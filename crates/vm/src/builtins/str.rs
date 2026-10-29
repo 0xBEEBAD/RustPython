@@ -866,7 +866,7 @@ impl PyStr {
     }
 
     #[pymethod]
-    fn lower(&self) -> Self {
+    pub(crate) fn lower(&self) -> Self {
         match self.as_str_kind() {
             PyKindStr::Ascii(s) => s.to_ascii_lowercase().into(),
             PyKindStr::Utf8(s) => unicode::case::to_lowercase_16(s).into(),
@@ -889,7 +889,7 @@ impl PyStr {
     }
 
     #[pymethod]
-    fn upper(&self) -> Self {
+    pub(crate) fn upper(&self) -> Self {
         match self.as_str_kind() {
             PyKindStr::Ascii(s) => s.to_ascii_uppercase().into(),
             PyKindStr::Utf8(s) => unicode::case::to_uppercase_16(s).into(),
@@ -1451,6 +1451,13 @@ impl PyStr {
     #[pymethod]
     fn find(&self, args: FindArgs) -> isize {
         self._find(args, Wtf8::find).map_or(-1, |v| v as isize)
+    }
+
+    /// `str.find(sub)` with no start/end arguments, for the call-specialization
+    /// fast path.
+    pub(crate) fn find_single(&self, sub: PyStrRef) -> isize {
+        self._find(FindArgs { sub, start: None, end: None }, Wtf8::find)
+            .map_or(-1, |v| v as isize)
     }
 
     #[pymethod]

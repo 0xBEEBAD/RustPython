@@ -7,6 +7,7 @@
 //! * `quickened` - restore the unconditional `quickened` atomic swap
 //! * `zeroarg` - restore the reserved spare slot for zero-argument calls
 //! * `classcall` - disable the no-`__init__` class-call fast path
+//! * `strmethod` - disable the exact-str method kernels
 
 use std::sync::OnceLock;
 
@@ -14,6 +15,7 @@ pub(crate) const NEXT_FAST: u8 = 1;
 pub(crate) const QUICKENED: u8 = 2;
 pub(crate) const ZERO_ARG: u8 = 8;
 pub(crate) const CLASS_CALL: u8 = 16;
+pub(crate) const STR_METHOD: u8 = 32;
 
 /// True when the named optimization is ablated through `LUNA_ABLATE`.
 pub(crate) fn ablated(bit: u8) -> bool {
@@ -27,6 +29,7 @@ pub(crate) fn ablated(bit: u8) -> bool {
                     "quickened" => QUICKENED,
                     "zeroarg" => ZERO_ARG,
                     "classcall" => CLASS_CALL,
+                    "strmethod" => STR_METHOD,
                     _ => 0,
                 };
             }

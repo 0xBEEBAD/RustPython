@@ -722,6 +722,10 @@ pub(crate) struct CallableCache {
     /// The builtin `next`. `CALL` specializations compare against it to invoke
     /// the iterator protocol directly, without the native-call machinery.
     pub next: Option<PyObjectRef>,
+    /// Exact descriptors for the str methods with direct call fast paths.
+    pub str_upper: Option<PyObjectRef>,
+    pub str_lower: Option<PyObjectRef>,
+    pub str_find: Option<PyObjectRef>,
 }
 
 pub struct PyGlobalState {
@@ -872,6 +876,12 @@ impl VirtualMachine {
         self.callable_cache.builtin_all = Some(self.builtins.get_attr("all", self)?);
         self.callable_cache.builtin_any = Some(self.builtins.get_attr("any", self)?);
         self.callable_cache.next = Some(self.builtins.get_attr("next", self)?);
+        let str_upper = self.ctx.types.str_type.get_attr(self.ctx.intern_str("upper"));
+        let str_lower = self.ctx.types.str_type.get_attr(self.ctx.intern_str("lower"));
+        let str_find = self.ctx.types.str_type.get_attr(self.ctx.intern_str("find"));
+        self.callable_cache.str_upper = str_upper;
+        self.callable_cache.str_lower = str_lower;
+        self.callable_cache.str_find = str_find;
         Ok(())
     }
 

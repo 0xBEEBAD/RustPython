@@ -6519,6 +6519,44 @@ impl ExecutingFrame<'_> {
                             .as_ref()
                             .is_some_and(|self_obj| self_obj.class().is(descr.objclass))
                     {
+                        // Exact-str kernels for the hottest no-argument methods:
+                        // no argument vector, no FuncArgs, no call context.
+                        if self_or_null_is_some
+                            && !crate::perf_debug::ablated(crate::perf_debug::STR_METHOD)
+                        {
+                            let value = {
+                                let receiver = self
+                                    .localsplus
+                                    .stack_index(self_index)
+                                    .as_ref()
+                                    .and_then(|o| o.downcast_ref_if_exact::<PyStr>(vm));
+                                receiver.and_then(|s| {
+                                    if vm
+                                        .callable_cache
+                                        .str_upper
+                                        .as_ref()
+                                        .is_some_and(|f| callable.is(f))
+                                    {
+                                        Some(PyStr::upper(s))
+                                    } else if vm
+                                        .callable_cache
+                                        .str_lower
+                                        .as_ref()
+                                        .is_some_and(|f| callable.is(f))
+                                    {
+                                        Some(PyStr::lower(s))
+                                    } else {
+                                        None
+                                    }
+                                })
+                            };
+                            if let Some(value) = value {
+                                self.pop_value_opt(); // self
+                                self.pop_value(); // callable
+                                self.push_value(value.into_ref(&vm.ctx).into());
+                                return Ok(None);
+                            }
+                        }
                         let func = descr.method.func;
                         // One pass: drain the positional args and prepend the
                         // explicit self (one spare slot reserved for it). The
@@ -6577,6 +6615,40 @@ impl ExecutingFrame<'_> {
                             .as_ref()
                             .is_some_and(|self_obj| self_obj.class().is(descr.objclass))
                     {
+                        // str.find(one exact-str argument) without the argument
+                        // vector and generic binding.
+                        if self_or_null_is_some
+                            && !crate::perf_debug::ablated(crate::perf_debug::STR_METHOD)
+                            && vm
+                                .callable_cache
+                                .str_find
+                                .as_ref()
+                                .is_some_and(|f| callable.is(f))
+                        {
+                            let value = {
+                                let receiver = self
+                                    .localsplus
+                                    .stack_index(self_index)
+                                    .as_ref()
+                                    .and_then(|o| o.downcast_ref_if_exact::<PyStr>(vm));
+                                let needle = self
+                                    .localsplus
+                                    .stack_index(stack_len - 1)
+                                    .as_ref()
+                                    .and_then(|o| o.downcast_ref_if_exact::<PyStr>(vm));
+                                match (receiver, needle) {
+                                    (Some(s), Some(n)) => Some(s.find_single(n.to_owned())),
+                                    _ => None,
+                                }
+                            };
+                            if let Some(value) = value {
+                                self.pop_value(); // argument
+                                self.pop_value_opt(); // self
+                                self.pop_value(); // callable
+                                self.push_value(vm.ctx.new_int(value).into());
+                                return Ok(None);
+                            }
+                        }
                         let func = descr.method.func;
                         // One pass: drain the positional args and prepend the
                         // explicit self (one spare slot reserved for it). The
