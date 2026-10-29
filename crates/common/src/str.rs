@@ -287,7 +287,7 @@ enum StrStorage {
 /// An SSO buffer must fit into the space the `Vec<u8>` variant already
 /// occupies (24 bytes): one length byte plus up to 22 payload bytes, so
 /// adding it does not grow `StrData` (or the `PyStr` header that embeds it).
-const SSO_CAP: usize = 22;
+pub const SSO_CAPACITY: usize = 22;
 
 const _: () = assert!(size_of::<SsoBuf>() <= size_of::<Vec<u8>>());
 
@@ -295,7 +295,7 @@ const _: () = assert!(size_of::<SsoBuf>() <= size_of::<Vec<u8>>());
 #[derive(Debug, Clone)]
 struct SsoBuf {
     len: u8,
-    bytes: [u8; SSO_CAP],
+    bytes: [u8; SSO_CAPACITY],
 }
 
 impl SsoBuf {
@@ -304,10 +304,10 @@ impl SsoBuf {
     /// [`StrData::kind`], not in the buffer.
     #[inline]
     fn new(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() > SSO_CAP {
+        if bytes.len() > SSO_CAPACITY {
             return None;
         }
-        let mut buf = [0u8; SSO_CAP];
+        let mut buf = [0u8; SSO_CAPACITY];
         buf[..bytes.len()].copy_from_slice(bytes);
         Some(Self {
             len: bytes.len() as u8,
@@ -1214,10 +1214,10 @@ mod tests {
 
     #[test]
     fn sso_boundary_lengths() {
-        let max = "x".repeat(SSO_CAP);
+        let max = "x".repeat(SSO_CAPACITY);
         let d = StrData::try_sso_ascii(max.as_bytes()).expect("cap-length fits");
-        assert_eq!(d.len(), SSO_CAP);
-        let over = "y".repeat(SSO_CAP + 1);
+        assert_eq!(d.len(), SSO_CAPACITY);
+        let over = "y".repeat(SSO_CAPACITY + 1);
         assert!(StrData::try_sso_ascii(over.as_bytes()).is_none());
         // An SSO buffer never grows StrStorage past the Vec variant's slot.
         assert!(size_of::<SsoBuf>() <= size_of::<Vec<u8>>());
@@ -1262,9 +1262,9 @@ mod tests {
         assert!(matches!(short.data, StrStorage::Sso(_)));
         assert_eq!(short.as_str(), Some("abcdef"));
 
-        let long = StrData::from("z".repeat(SSO_CAP + 1).into_boxed_str());
+        let long = StrData::from("z".repeat(SSO_CAPACITY + 1).into_boxed_str());
         assert!(matches!(long.data, StrStorage::Heap(_)));
-        assert_eq!(long.len(), SSO_CAP + 1);
+        assert_eq!(long.len(), SSO_CAPACITY + 1);
 
         let boxed_ascii = StrData::from(
             ascii::AsciiString::from_ascii("abc")

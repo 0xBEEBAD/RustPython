@@ -451,9 +451,11 @@ pub(crate) fn cformat_string(
 
     let mut result = Wtf8Buf::new();
 
-    let is_mapping = values_obj.class().has_attr(identifier!(vm, __getitem__))
-        && !values_obj.fast_isinstance(vm.ctx.types.tuple_type)
-        && !values_obj.fast_isinstance(vm.ctx.types.str_type);
+    // Check the exact-container cases first: `has_attr` walks the type's MRO,
+    // and tuples/strings are the common `%`-formatting arguments.
+    let is_mapping = !values_obj.fast_isinstance(vm.ctx.types.tuple_type)
+        && !values_obj.fast_isinstance(vm.ctx.types.str_type)
+        && values_obj.class().has_attr(identifier!(vm, __getitem__));
 
     if num_specifiers == 0 {
         if !is_mapping

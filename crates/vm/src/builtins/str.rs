@@ -1934,7 +1934,20 @@ impl AsNumber for PyStr {
                 let Some(b) = b.downcast_ref::<PyStr>() else {
                     return Ok(vm.ctx.not_implemented());
                 };
-                let bytes = a.as_wtf8().py_add(b.as_wtf8());
+                let (a_wtf8, b_wtf8) = (a.as_wtf8(), b.as_wtf8());
+                // Short results fit in the header-owned SSO buffer; build them
+                // without allocating a heap buffer first.
+                let total = a_wtf8.len() + b_wtf8.len();
+                if total <= crate::common::str::SSO_CAPACITY {
+                    let mut buf = [0u8; crate::common::str::SSO_CAPACITY];
+                    let (x, y) = (a_wtf8.as_bytes(), b_wtf8.as_bytes());
+                    buf[..x.len()].copy_from_slice(x);
+                    buf[x.len()..total].copy_from_slice(y);
+                    if let Some(data) = StrData::try_sso(&buf[..total]) {
+                        return Ok(PyStr::from(data).into_ref(&vm.ctx).into());
+                    }
+                }
+                let bytes = a_wtf8.py_add(b_wtf8);
                 Ok(unsafe {
                     let kind = a.kind() | b.kind();
                     PyStr::new_str_unchecked(bytes.into(), kind)
