@@ -13,6 +13,7 @@
 //! * `slicefast` - disable the direct str slicing fast path
 //! * `join` - disable the single-allocation ASCII join path
 //! * `lazydict` - create instance dicts eagerly again
+//! * `excctor` - disable the direct builtin-exception constructor
 
 use std::sync::OnceLock;
 
@@ -26,6 +27,7 @@ pub(crate) const SPLIT: u16 = 128;
 pub(crate) const SLICE_FAST: u16 = 256;
 pub(crate) const JOIN: u16 = 1024;
 pub(crate) const LAZY_DICT: u16 = 2048;
+pub(crate) const EXC_CTOR: u16 = 4096;
 
 /// True when the named optimization is ablated through `LUNA_ABLATE`.
 pub(crate) fn ablated(bit: u16) -> bool {
@@ -45,6 +47,7 @@ pub(crate) fn ablated(bit: u16) -> bool {
                     "slicefast" => SLICE_FAST,
                     "join" => JOIN,
                     "lazydict" => LAZY_DICT,
+                    "excctor" => EXC_CTOR,
                     _ => 0,
                 };
             }

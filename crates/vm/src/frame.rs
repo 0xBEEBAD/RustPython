@@ -7037,6 +7037,39 @@ impl ExecutingFrame<'_> {
                     return self.execute_call_vectorcall(nargs, vm);
                 }
                 let nargs_usize = nargs as usize;
+                // Builtin exception types: construct directly. Going through
+                // `type.__call__` runs `BaseException.__new__` (which builds an
+                // args tuple) and then `BaseException.__init__` (which builds
+                // the same tuple again), plus the vectorcall argument vector.
+                let exc_cls = if !crate::perf_debug::ablated(crate::perf_debug::EXC_CTOR)
+                    && !vm.use_tracing.get()
+                    && !self_or_null_is_some
+                {
+                    // Only the well-known builtin exception types whose
+                    // constructor is the plain BaseException one; subtypes with
+                    // their own __init__ (SyntaxError, OSError, ...) keep the
+                    // generic type-call path.
+                    callable
+                        .downcast_ref_if_exact::<PyType>(vm)
+                        .filter(|cls| {
+                            vm.callable_cache
+                                .plain_exceptions
+                                .iter()
+                                .any(|t| t.is(cls.as_object()))
+                        })
+                        .map(|cls| cls.to_owned())
+                } else {
+                    None
+                };
+                if let Some(cls) = exc_cls {
+                    let args: Vec<PyObjectRef> = self.pop_multiple(nargs_usize).collect();
+                    let _ = self.pop_value_opt(); // self_or_null (null)
+                    let _ = self.pop_value(); // callable
+                    let exc =
+                        PyBaseException::new(args, vm).into_ref_with_type_lazy_dict(vm, cls)?;
+                    self.push_value(exc.into());
+                    return Ok(None);
+                }
                 let total_nargs = nargs_usize + usize::from(self_or_null_is_some);
                 // One pass: drain the positional args, then prepend
                 // self_or_null (if any). One spare slot is reserved so a
