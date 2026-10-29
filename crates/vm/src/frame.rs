@@ -9446,6 +9446,18 @@ impl ExecutingFrame<'_> {
                 {
                     return Some(arg_str.to_owned().into());
                 }
+                // `"literal %s/%d" % (exact str/int, ...)`: skip the number
+                // slot dispatch and the tuple clone taken by `__mod__`.
+                if let Some(fmt) = a.downcast_ref_if_exact::<PyStr>(vm)
+                    && let Some(tuple) = b.downcast_ref_if_exact::<PyTuple>(vm)
+                    && let Some(buf) = crate::builtins::pystr::format_simple_percent(
+                        fmt.as_wtf8(),
+                        tuple.as_slice(),
+                        vm,
+                    )
+                {
+                    return Some(vm.ctx.new_str(buf).into());
+                }
                 if let (Some(a), Some(b)) = (
                     a.downcast_ref_if_exact::<PyInt>(vm),
                     b.downcast_ref_if_exact::<PyInt>(vm),

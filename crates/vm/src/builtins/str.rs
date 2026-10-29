@@ -1141,6 +1141,11 @@ impl PyStr {
     }
 
     pub fn __mod__(&self, values: PyObjectRef, vm: &VirtualMachine) -> PyResult<Wtf8Buf> {
+        if let Some(tuple) = values.downcast_ref_if_exact::<PyTuple>(vm)
+            && let Some(buf) = format_simple_percent(self.as_wtf8(), tuple.as_slice(), vm)
+        {
+            return Ok(buf);
+        }
         cformat_string(vm, self.as_wtf8(), values)
     }
 
@@ -3011,6 +3016,90 @@ impl AsRef<str> for PyUtf8StrInterned {
     fn as_ref(&self) -> &str {
         self.as_str()
     }
+}
+
+/// Fast path for `"text %s text %d" % (str, int)` with an exact tuple.
+///
+/// Handles only exact `str`/`int` elements with bare `%s`, `%d` and `%%`
+/// conversions. Everything else (flags, widths, other conversions, subclasses,
+/// ints beyond i64) returns `None` and the caller falls back to
+/// `cformat_string`, which also raises the CPython-compatible errors for
+/// arity mismatches. Nothing is written outside `buf` before the shape is
+/// fully validated, so a fallback has no visible side effects.
+pub(crate) fn format_simple_percent(
+    template: &Wtf8,
+    args: &[PyObjectRef],
+    vm: &VirtualMachine,
+) -> Option<Wtf8Buf> {
+    let bytes = template.as_bytes();
+    if !bytes.contains(&b'%') {
+        return None;
+    }
+    let mut buf = Wtf8Buf::with_capacity(bytes.len() + 16);
+    let mut argi = 0usize;
+    let mut lit_start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b'%' {
+            i += 1;
+            continue;
+        }
+        if lit_start < i {
+            // SAFETY: the template is valid WTF-8 and '%' is ASCII, so a
+            // literal run that ends (or starts) at a specifier never splits
+            // a code point.
+            buf.push_wtf8(unsafe { Wtf8::from_bytes_unchecked(&bytes[lit_start..i]) });
+        }
+        match *bytes.get(i + 1)? {
+            b'%' => buf.push_char('%'),
+            b's' => {
+                let s = args.get(argi)?.downcast_ref_if_exact::<PyStr>(vm)?;
+                argi += 1;
+                buf.push_wtf8(s.as_wtf8());
+            }
+            b'd' => {
+                let n = args
+                    .get(argi)?
+                    .downcast_ref_if_exact::<PyInt>(vm)?
+                    .as_bigint()
+                    .to_i64()?;
+                argi += 1;
+                push_decimal_i64(&mut buf, n);
+            }
+            _ => return None,
+        }
+        i += 2;
+        lit_start = i;
+    }
+    if lit_start < bytes.len() {
+        // SAFETY: as above; this run starts right after an ASCII specifier.
+        buf.push_wtf8(unsafe { Wtf8::from_bytes_unchecked(&bytes[lit_start..]) });
+    }
+    if argi != args.len() {
+        return None;
+    }
+    Some(buf)
+}
+
+/// Append the decimal representation of `value` (CPython `%d` for exact ints).
+fn push_decimal_i64(buf: &mut Wtf8Buf, value: i64) {
+    let mut tmp = [0u8; 20];
+    let mut pos = tmp.len();
+    let negative = value < 0;
+    let mut mag = (value as i128).unsigned_abs();
+    loop {
+        pos -= 1;
+        tmp[pos] = b'0' + (mag % 10) as u8;
+        mag /= 10;
+        if mag == 0 {
+            break;
+        }
+    }
+    if negative {
+        buf.push_char('-');
+    }
+    // SAFETY: `tmp[pos..]` only contains ASCII digits written above.
+    buf.push_str(core::str::from_utf8(&tmp[pos..]).expect("decimal digits"));
 }
 
 #[cfg(test)]
