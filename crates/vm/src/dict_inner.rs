@@ -462,11 +462,11 @@ impl<T: Clone> Dict<T> {
     /// Single-threaded lock-free value update for an existing key.
     ///
     /// Probes the table via interior mutability and overwrites the mapped
-    /// value when the key is present. Returns `false` (without side effects)
-    /// when the key is absent, the hash needs Python `__hash__`, or equality
-    /// needs the full protocol — the caller then falls back to the standard
-    /// locked insert/update. Value updates never change the key set, so the
-    /// keys-version stamp stays valid and is not bumped.
+    /// value when the key is present. Returns `Err(value)` (without side
+    /// effects) when the key is absent, the hash needs Python `__hash__`, or
+    /// equality needs the full protocol — the caller then falls back to the
+    /// standard locked insert/update. Value updates never change the key set,
+    /// so the keys-version stamp stays valid and is not bumped.
     ///
     /// # Safety
     /// Caller must guarantee no other thread can touch this dict
@@ -476,14 +476,14 @@ impl<T: Clone> Dict<T> {
         vm: &VirtualMachine,
         key: &K,
         value: T,
-    ) -> bool {
+    ) -> Result<(), T> {
         let hash = match key.key_hash(vm) {
             Ok(h) => h,
-            Err(_) => return false,
+            Err(_) => return Err(value),
         };
         let inner: &mut DictInner<T> = unsafe { &mut *self.inner.data_ptr() };
         if inner.indices.is_empty() {
-            return false;
+            return Err(value);
         }
         let mask = (inner.indices.len() - 1) as HashIndex;
         let mut idxs = GenIndexes::new(hash, mask);
@@ -491,12 +491,12 @@ impl<T: Clone> Dict<T> {
             // SAFETY: idxs.next() is masked against the table size.
             let index_entry = unsafe { *inner.indices.get_unchecked(idxs.next()) };
             match index_entry {
-                IndexEntry::FREE => return false,
+                IndexEntry::FREE => return Err(value),
                 IndexEntry::DUMMY => {}
                 idx => {
                     let i = match idx.index() {
                         Some(i) => i,
-                        None => return false,
+                        None => return Err(value),
                     };
                     let Some(Some(entry)) = inner.entries.get_mut(i) else {
                         continue;
@@ -512,7 +512,7 @@ impl<T: Clone> Dict<T> {
                         // `inner`/`entry` are not used past this point; the decref is deferred
                         // until the raw borrows are dead.
                         drop(removed);
-                        return true;
+                        return Ok(());
                     }
                     if entry.hash != hash {
                         continue;
@@ -521,10 +521,10 @@ impl<T: Clone> Dict<T> {
                         Some(true) => {
                             let removed = core::mem::replace(&mut entry.value, value);
                             drop(removed);
-                            return true;
+                            return Ok(());
                         }
                         Some(false) => continue,
-                        None => return false,
+                        None => return Err(value),
                     }
                 }
             }

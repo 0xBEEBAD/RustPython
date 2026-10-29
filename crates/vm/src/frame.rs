@@ -562,6 +562,21 @@ impl LocalsPlus {
         unsafe { core::mem::transmute::<usize, Option<PyStackRef>>(raw) }
     }
 
+    /// Promote every borrowed eval-stack entry to an owned reference.
+    ///
+    /// A borrowed entry does not keep its object alive: the fastlocal slot it
+    /// was loaded from owns the reference. Any operation that can clear or
+    /// overwrite fastlocals while borrowed entries are still live on the
+    /// stack (exception handler entry, yield, `f_locals` writes) must call
+    /// this first, otherwise the borrowed pointer could dangle.
+    pub(crate) fn promote_borrowed_stack(&mut self) {
+        for i in 0..self.stack_top as usize {
+            if let Some(sr) = self.stack_index_mut(i) {
+                sr.promote();
+            }
+        }
+    }
+
     /// Immutable view of the active stack as `Option<PyStackRef>` slice.
     #[inline(always)]
     fn stack_as_slice(&self) -> &[Option<PyStackRef>] {
@@ -1971,11 +1986,18 @@ impl FrameObject {
         // Use live source iframe if available so writes reach the
         // executing frame's actual local variables.
         let live = self.find_live_source_iframe();
-        let fastlocals = if !live.is_null() {
-            unsafe { &mut *live.cast_mut() }.localsplus.fastlocals_mut()
-        } else {
-            unsafe { self.iframe_mut().localsplus.fastlocals_mut() }
+        let localsplus = unsafe {
+            if !live.is_null() {
+                &mut (*live.cast_mut()).localsplus
+            } else {
+                &mut self.iframe_mut().localsplus
+            }
         };
+        // Overwriting a fastlocal can drop the object a borrowed eval-stack
+        // entry still points at (e.g. `a[mutate("a", ...)]`). Promote those
+        // entries to owned references before replacing the slot.
+        localsplus.promote_borrowed_stack();
+        let fastlocals = localsplus.fastlocals_mut();
         if kind & (CO_FAST_CELL | CO_FAST_FREE) != 0
             && let Some(obj) = fastlocals[i].as_ref()
             && let Some(cell) = obj.downcast_ref::<PyCell>()
@@ -4494,21 +4516,25 @@ impl ExecutingFrame<'_> {
                 self.push_value(x2);
                 Ok(None)
             }
-            // Borrow optimization not yet active; falls back to clone.
-            // push_borrowed() is available but disabled until stack
-            // lifetime issues at yield/exception points are resolved.
             Instruction::LoadFastBorrow { var_num } => {
                 let idx = var_num.get(arg).as_usize();
                 // SAFETY: bytecode compiler guarantees var_num < nlocals.
-                let x = unsafe { self.localsplus.fastlocals().get_unchecked(idx) }
-                    .clone()
+                let obj = unsafe { self.localsplus.fastlocals().get_unchecked(idx) }
+                    .as_ref()
                     .ok_or_else(|| {
                         vm.new_unbound_local_error(format!(
                             "local variable '{}' referenced before assignment",
                             self.code.varnames[idx]
                         ))
                     })?;
-                self.push_value(x);
+                // Borrow instead of cloning: the local slot owns the reference.
+                // The codegen borrow analysis guarantees the value is consumed
+                // before any overwrite of this local in the same block; paths
+                // that can clear locals while values are live (exception
+                // handlers, yields, f_locals writes) promote the stack first.
+                let obj: *const PyObject = obj.as_object();
+                // SAFETY: see comment above.
+                unsafe { self.push_borrowed(&*obj) };
                 Ok(None)
             }
             Instruction::LoadFastBorrowLoadFastBorrow { var_nums } => {
@@ -4516,20 +4542,30 @@ impl ExecutingFrame<'_> {
                 let (idx1, idx2) = oparg.indexes();
                 let fastlocals = self.localsplus.fastlocals();
                 // SAFETY: compiler guarantees both VarNums < nlocals.
-                let x1 = unsafe { fastlocals.get_unchecked(idx1.as_usize()) }.clone().ok_or_else(|| {
-                    vm.new_unbound_local_error(format!(
-                        "local variable '{}' referenced before assignment",
-                        self.code.varnames[idx1.as_usize()]
-                    ))
-                })?;
-                let x2 = unsafe { fastlocals.get_unchecked(idx2.as_usize()) }.clone().ok_or_else(|| {
-                    vm.new_unbound_local_error(format!(
-                        "local variable '{}' referenced before assignment",
-                        self.code.varnames[idx2.as_usize()]
-                    ))
-                })?;
-                self.push_value(x1);
-                self.push_value(x2);
+                let x1 = unsafe { fastlocals.get_unchecked(idx1.as_usize()) }
+                    .as_ref()
+                    .ok_or_else(|| {
+                        vm.new_unbound_local_error(format!(
+                            "local variable '{}' referenced before assignment",
+                            self.code.varnames[idx1.as_usize()]
+                        ))
+                    })?;
+                let x2 = unsafe { fastlocals.get_unchecked(idx2.as_usize()) }
+                    .as_ref()
+                    .ok_or_else(|| {
+                        vm.new_unbound_local_error(format!(
+                            "local variable '{}' referenced before assignment",
+                            self.code.varnames[idx2.as_usize()]
+                        ))
+                    })?;
+                // Borrowed loads; see LoadFastBorrow for the safety argument.
+                let p1: *const PyObject = x1.as_object();
+                let p2: *const PyObject = x2.as_object();
+                // SAFETY: the local slots keep both objects alive.
+                unsafe {
+                    self.push_borrowed(&*p1);
+                    self.push_borrowed(&*p2);
+                }
                 Ok(None)
             }
             Instruction::LoadGlobal { namei: idx } => {
@@ -5219,6 +5255,10 @@ impl ExecutingFrame<'_> {
                 Ok(None)
             }
             Instruction::YieldValue { .. } => {
+                // The frame is suspended here and its localsplus can be
+                // observed/mutated through `gi_frame.f_locals`, so no borrowed
+                // entry may outlive the yield.
+                self.localsplus.promote_borrowed_stack();
                 debug_assert!(
                     self.localsplus
                         .stack_as_slice()
@@ -5903,12 +5943,14 @@ impl ExecutingFrame<'_> {
                 if let Some(dict) = obj.downcast_ref_if_exact::<PyDict>(vm) {
                     // Single-threaded: lock-elided in-place update for keys
                     // already present. Absent/new keys fall through to the
-                    // standard locked insert.
-                    if dict.set_item_existing_single_thread(&*idx, value.clone(), vm) {
-                        return Ok(None);
+                    // standard locked insert, reusing the value without a clone.
+                    match dict.set_item_existing_single_thread(&*idx, value, vm) {
+                        Ok(()) => Ok(None),
+                        Err(value) => {
+                            dict.set_item(&*idx, value, vm)?;
+                            Ok(None)
+                        }
                     }
-                    dict.set_item(&*idx, value, vm)?;
-                    Ok(None)
                 } else {
                     obj.set_item(&*idx, value, vm)?;
                     Ok(None)
@@ -6225,21 +6267,29 @@ impl ExecutingFrame<'_> {
                 if !self_or_null_is_some
                     && let Some(bound_method) = callable.downcast_ref_if_exact::<PyBoundMethod>(vm)
                 {
-                    let bound_function = bound_method.function_obj().clone();
-                    let bound_self = bound_method.self_obj().clone();
-                    if let Some(func) = bound_function.downcast_ref_if_exact::<PyFunction>(vm)
-                        && func.func_version() == cached_version
-                        && cached_version != 0
-                    {
-                        if !func.has_exact_argcount(nargs + 1) {
-                            return self.execute_call_vectorcall(nargs, vm);
-                        }
-                        if !self.specialization_has_datastack_space_for_func(vm, func) {
-                            return self.execute_call_vectorcall(nargs, vm);
-                        }
-                        if self.specialization_call_recursion_guard(vm) {
-                            return self.execute_call_vectorcall(nargs, vm);
-                        }
+                    // Validate before cloning: the method stays alive on the
+                    // stack (then in pending refs) during the guards.
+                    let prepared = {
+                        let function_obj = bound_method.function_obj();
+                        function_obj
+                            .downcast_ref_if_exact::<PyFunction>(vm)
+                            .and_then(|func| {
+                                if cached_version == 0
+                                    || func.func_version() != cached_version
+                                    || !func.has_exact_argcount(nargs + 1)
+                                    || !self
+                                        .specialization_has_datastack_space_for_func(vm, func)
+                                    || self.specialization_call_recursion_guard(vm)
+                                {
+                                    return None;
+                                }
+                                Some((function_obj.clone(), bound_method.self_obj().clone()))
+                            })
+                    };
+                    if let Some((bound_function, bound_self)) = prepared {
+                        let func = bound_function
+                            .downcast_ref_if_exact::<PyFunction>(vm)
+                            .unwrap();
                         if self.tailcall_enabled && !func.is_generator_like() {
                             self.tailcall_prepare_bound_method_frame(
                                 nargs,
@@ -7931,6 +7981,8 @@ impl ExecutingFrame<'_> {
                 self.unwind_blocks(vm, UnwindReason::Returning { value })
             }
             Instruction::InstrumentedYieldValue => {
+                // See YieldValue: promote before the frame becomes suspended.
+                self.localsplus.promote_borrowed_stack();
                 debug_assert!(
                     self.localsplus
                         .stack_as_slice()
@@ -8511,19 +8563,25 @@ impl ExecutingFrame<'_> {
                         let _ = self.localsplus.stack_pop();
                     }
 
-                    // 2. If push_lasti=true (SETUP_CLEANUP), push lasti before exception
+                    // 2. Values preserved below the handler depth may include
+                    // borrowed local loads. The handler body can overwrite
+                    // those locals (the codegen borrow analysis does not model
+                    // handler bodies), so take owned references now.
+                    self.localsplus.promote_borrowed_stack();
+
+                    // 3. If push_lasti=true (SETUP_CLEANUP), push lasti before exception
                     // pushes lasti as PyLong
                     if entry.push_lasti {
                         self.push_value(vm.ctx.new_int(offset as i32).into());
                     }
 
-                    // 3. Push exception onto stack
+                    // 4. Push exception onto stack
                     // always push exception, PUSH_EXC_INFO transforms [exc] -> [prev_exc, exc]
                     // Do NOT call vm.set_exception here! PUSH_EXC_INFO will do it.
                     // PUSH_EXC_INFO needs to get prev_exc from vm.current_exception() BEFORE setting the new one.
                     self.push_value(exception.into());
 
-                    // 4. Jump to handler
+                    // 5. Jump to handler
                     self.jump(bytecode::Label::from_u32(entry.target));
 
                     Ok(None)

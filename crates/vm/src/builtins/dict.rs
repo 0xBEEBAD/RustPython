@@ -829,14 +829,17 @@ impl Py<PyDict> {
     /// Returns `false` when the fast path does not apply (multi-threaded,
     /// subclassed dict, key needing `__hash__`/full equality, or key absent
     /// — the caller then uses the standard locked insert/update).
+    /// Single-threaded lock-elided store that returns the value back when the
+    /// fast path does not apply, so the caller can hand ownership to the
+    /// locked path without cloning.
     pub(crate) fn set_item_existing_single_thread(
         &self,
         key: &PyObject,
         value: PyObjectRef,
         vm: &VirtualMachine,
-    ) -> bool {
+    ) -> Result<(), PyObjectRef> {
         if vm.state.thread_count.load() != 0 || !self.exact_dict(vm) {
-            return false;
+            return Err(value);
         }
         // SAFETY: no other thread can touch this dict right now.
         unsafe { self.entries.update_existing_raw(vm, key, value) }

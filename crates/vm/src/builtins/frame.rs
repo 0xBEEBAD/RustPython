@@ -792,6 +792,10 @@ impl Py<FrameObject> {
         // Clear fastlocals
         // SAFETY: FrameObject is not executing (detached or stopped).
         {
+            // Defensive: a suspended frame should have no borrowed stack
+            // entries (yield promotes them), but promote before dropping the
+            // slots that own those references.
+            unsafe { self.iframe_mut().localsplus.promote_borrowed_stack() };
             let fastlocals = unsafe { self.fastlocals_mut() };
             for slot in fastlocals.iter_mut() {
                 *slot = None;
