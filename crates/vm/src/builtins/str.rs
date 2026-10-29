@@ -1189,21 +1189,27 @@ impl PyStr {
             return None;
         }
 
+        // The template was fully validated above, so literals can be written
+        // straight into the result and the buffer can be pre-sized.
         let mut chars = self.as_wtf8().code_points();
-        let mut literal = Wtf8Buf::new();
-        let mut result = Wtf8Buf::new();
+        let mut result = Wtf8Buf::with_capacity(
+            self.as_wtf8()
+                .len()
+                .saturating_add(args.args.len().saturating_mul(8)),
+        );
         let mut arg_index = 0usize;
         while let Some(ch) = chars.next() {
             if ch == CodePoint::from_char('{') {
                 let _ = chars.next();
-                result.push_wtf8(literal.as_ref());
-                literal = Wtf8Buf::new();
                 let argument = &args.args[arg_index];
                 if let Some(integer) = argument.downcast_ref_if_exact::<PyInt>(vm) {
                     if let Err(err) = check_int_to_str_digits(integer.as_bigint(), vm) {
                         return Some(Err(err));
                     }
                     result.push_str(&integer.to_str_radix_10());
+                } else if let Some(text) = argument.downcast_ref_if_exact::<PyStr>(vm) {
+                    // Empty format spec on an exact str is the string itself.
+                    result.push_wtf8(text.as_wtf8());
                 } else {
                     let formatted = match vm.format(argument, vm.ctx.empty_str.to_owned()) {
                         Ok(value) => value,
@@ -1213,10 +1219,9 @@ impl PyStr {
                 }
                 arg_index += 1;
             } else {
-                literal.push(ch);
+                result.push(ch);
             }
         }
-        result.push_wtf8(literal.as_ref());
         Some(Ok(result))
     }
 
