@@ -112,6 +112,16 @@ thread_local! {
     static CURRENT_TOP_IFRAME_SLOT: Cell<*const AtomicUsize> =
         const { Cell::new(core::ptr::null()) };
 
+    /// Cached pointer to this thread's `ThreadSlot::exception` atomic. Generator
+    /// and coroutine resumes publish their exception slot twice per resume; with
+    /// this cache that is a single atomic swap instead of a TLS lookup, a
+    /// `RefCell` borrow and an `Arc` dereference. Cleared before the slot can be
+    /// dropped, like the frame pointers above.
+    #[cfg(feature = "threading")]
+    static CURRENT_EXC_SLOT: Cell<
+        *const crate::PyAtomicRef<Option<crate::exceptions::types::PyBaseException>>,
+    > = const { Cell::new(core::ptr::null()) };
+
 }
 
 #[must_use]
@@ -373,6 +383,7 @@ fn init_thread_slot_if_needed(vm: &VirtualMachine) {
             #[cfg(all(unix, feature = "threading"))]
             CURRENT_TOP_FRAME_SLOT.with(|c| c.set(&new_slot.top_frame));
             CURRENT_TOP_IFRAME_SLOT.with(|c| c.set(&new_slot.top_iframe));
+            CURRENT_EXC_SLOT.with(|c| c.set(&new_slot.exception));
             *slot.borrow_mut() = Some(new_slot);
         }
     });
@@ -714,10 +725,17 @@ pub fn get_current_frame() -> *const InterpreterFrame {
 /// Called from push_exception/pop_exception/set_exception.
 #[cfg(feature = "threading")]
 pub fn update_thread_exception(exc: Option<PyBaseExceptionRef>) {
+    let slot = CURRENT_EXC_SLOT.with(|c| c.get());
+    if !slot.is_null() {
+        // SAFETY: the pointer stays valid until `cleanup_current_thread_frames`
+        // clears the cache (before the slot Arc can be dropped), and only the
+        // owning thread writes its own slot. The old ref is dropped here on the
+        // owning thread, which is safe.
+        let _old = unsafe { (*slot).swap(exc) };
+        return;
+    }
     CURRENT_THREAD_SLOT.with(|slot| {
         if let Some(s) = slot.borrow().as_ref() {
-            // SAFETY: Called only from the owning thread. The old ref is dropped
-            // here on the owning thread, which is safe.
             let _old = unsafe { s.exception.swap(exc) };
         }
     });
@@ -780,6 +798,7 @@ pub fn cleanup_current_thread_frames(vm: &VirtualMachine) {
     CURRENT_TOP_FRAME_SLOT.with(|c| c.set(core::ptr::null()));
     #[cfg(feature = "threading")]
     CURRENT_TOP_IFRAME_SLOT.with(|c| c.set(core::ptr::null()));
+    CURRENT_EXC_SLOT.with(|c| c.set(core::ptr::null()));
     CURRENT_THREAD_SLOT.with(|s| {
         *s.borrow_mut() = None;
     });
@@ -822,6 +841,7 @@ pub fn reinit_frame_slot_after_fork(vm: &VirtualMachine) {
     #[cfg(all(unix, feature = "threading"))]
     CURRENT_TOP_FRAME_SLOT.with(|c| c.set(&new_slot.top_frame));
     CURRENT_TOP_IFRAME_SLOT.with(|c| c.set(&new_slot.top_iframe));
+    CURRENT_EXC_SLOT.with(|c| c.set(&new_slot.exception));
 
     // Lock is safe: reinit_locks_after_fork() already reset it to unlocked.
     let mut registry = vm.state.thread_frames.lock();
