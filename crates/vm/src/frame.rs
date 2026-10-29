@@ -7765,7 +7765,7 @@ impl ExecutingFrame<'_> {
                     };
                     if let Some(value) = value {
                         let obj: PyObjectRef = vm.ctx.new_int(value).into();
-                        if let Err(obj) = self.for_iter_store_fast(obj, vm) {
+                        if let Err(obj) = self.store_result_to_next_local(obj, Instruction::from(Opcode::ForIter).cache_entries(), vm) {
                             self.push_value(obj);
                         }
                     } else {
@@ -7789,7 +7789,7 @@ impl ExecutingFrame<'_> {
                         list_iter.fast_next()
                     };
                     if let Some(value) = value {
-                        if let Err(value) = self.for_iter_store_fast(value, vm) {
+                        if let Err(value) = self.store_result_to_next_local(value, Instruction::from(Opcode::ForIter).cache_entries(), vm) {
                             self.push_value(value);
                         }
                     } else {
@@ -7812,7 +7812,7 @@ impl ExecutingFrame<'_> {
                         tuple_iter.fast_next()
                     };
                     if let Some(value) = value {
-                        if let Err(value) = self.for_iter_store_fast(value, vm) {
+                        if let Err(value) = self.store_result_to_next_local(value, Instruction::from(Opcode::ForIter).cache_entries(), vm) {
                             self.push_value(value);
                         }
                     } else {
@@ -7838,7 +7838,7 @@ impl ExecutingFrame<'_> {
                     }
                     match generator.as_coro().send_none(iter, vm) {
                         Ok(PyIterReturn::Return(value)) => {
-                            if let Err(value) = self.for_iter_store_fast(value, vm) {
+                            if let Err(value) = self.store_result_to_next_local(value, Instruction::from(Opcode::ForIter).cache_entries(), vm) {
                                 self.push_value(value);
                             }
                         }
@@ -10699,7 +10699,13 @@ impl ExecutingFrame<'_> {
             let result = op(a_int.as_bigint(), b_int.as_bigint(), vm);
             self.pop_value();
             self.pop_value();
-            self.push_value(result);
+            if let Err(result) = self.store_result_to_next_local(
+                result,
+                Instruction::from(Opcode::BinaryOp).cache_entries(),
+                vm,
+            ) {
+                self.push_value(result);
+            }
             Ok(None)
         } else {
             self.execute_bin_op(vm, deopt_op)
@@ -10724,7 +10730,14 @@ impl ExecutingFrame<'_> {
             let result = op(a_f.to_f64(), b_f.to_f64());
             self.pop_value();
             self.pop_value();
-            self.push_value(vm.ctx.new_float(result).into());
+            let result = vm.ctx.new_float(result).into();
+            if let Err(result) = self.store_result_to_next_local(
+                result,
+                Instruction::from(Opcode::BinaryOp).cache_entries(),
+                vm,
+            ) {
+                self.push_value(result);
+            }
             Ok(None)
         } else {
             self.execute_bin_op(vm, deopt_op)
@@ -12127,28 +12140,30 @@ impl ExecutingFrame<'_> {
 
     /// If the instruction after the current one is a plain `STORE_FAST`, store
     /// `value` into that local and skip the instruction. Loop bodies compiled
-    /// from `for x in ...:` begin with `FOR_ITER` + `STORE_FAST`, so this
-    /// removes one dispatch and one eval-stack round-trip per iteration.
+    /// from `for x in ...:` begin with `FOR_ITER` + `STORE_FAST`, and
+    /// `x = a + b` compiles to `BINARY_OP` + `STORE_FAST`, so this removes one
+    /// dispatch and one eval-stack round-trip from each.
     /// `STORE_FAST` cannot raise or run Python code, so nothing can observe
     /// the skipped instruction except tracing and monitoring, which fall back
-    /// to the split path.
+    /// to the split path. `cache_units` is the number of inline cache slots of
+    /// the instruction currently executing, which precede the next one.
     #[inline]
-    fn for_iter_store_fast(
+    fn store_result_to_next_local(
         &mut self,
         value: PyObjectRef,
+        cache_units: usize,
         vm: &VirtualMachine,
     ) -> Result<(), PyObjectRef> {
         if vm.use_tracing.get() || vm.state.monitoring_events.load() != 0 {
             return Err(value);
         }
-        let next_idx =
-            self.lasti() as usize + Instruction::from(Opcode::ForIter).cache_entries();
+        let next_idx = self.lasti() as usize + cache_units;
         let Some(unit) = self.code.instructions.get(next_idx) else {
             return Err(value);
         };
-        // A plain STORE_FAST directly after FOR_ITER always carries its local
-        // index in the instruction's own byte (an EXTENDED_ARG would have been
-        // a separate instruction in between), and StoreFast is never quickened.
+        // A plain STORE_FAST always carries its local index in the
+        // instruction's own byte (an EXTENDED_ARG would have been a separate
+        // instruction in between), and StoreFast is never quickened.
         if matches!(unit.op, Instruction::StoreFast { .. }) {
             let idx = usize::from(u8::from(unit.arg));
             // SAFETY: bytecode compiler guarantees var_num < nlocals.
