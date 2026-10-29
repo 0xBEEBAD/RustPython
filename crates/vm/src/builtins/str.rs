@@ -1375,6 +1375,28 @@ impl PyStr {
             total = total.saturating_add(s.as_wtf8().len());
         }
         total = total.saturating_add(sep.len().saturating_mul(items.len() - 1));
+        // Short results fit in the header-owned SSO buffer: assemble them on
+        // the stack and skip the temporary heap buffer.
+        if total <= crate::common::str::SSO_CAPACITY
+            && !crate::perf_debug::ablated(crate::perf_debug::STR_CREATE)
+        {
+            let mut stack = [0u8; crate::common::str::SSO_CAPACITY];
+            let mut pos = 0usize;
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    let b = sep.as_bytes();
+                    stack[pos..pos + b.len()].copy_from_slice(b);
+                    pos += b.len();
+                }
+                let s = item.downcast_ref_if_exact::<Self>(vm).unwrap();
+                let b = s.as_wtf8().as_bytes();
+                stack[pos..pos + b.len()].copy_from_slice(b);
+                pos += b.len();
+            }
+            if let Some(data) = StrData::try_sso(&stack[..pos]) {
+                return Some(PyStr::from(data).into_ref(&vm.ctx));
+            }
+        }
         let mut buf = Wtf8Buf::with_capacity(total);
         for (i, item) in items.iter().enumerate() {
             if i > 0 {

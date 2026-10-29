@@ -500,8 +500,13 @@ impl Context {
         // fixed struct and mirror the WTF-8 data there. Readers use StrData
         // as before; once PyStr shrinks to a header-only layout the tail
         // lands at CPython's compact-data offset (+40) automatically.
-        let bytes: alloc::vec::Vec<u8> = s.as_wtf8().as_bytes().to_vec();
-        let extra = bytes.len() + 1;
+        let copy_to_tail = !crate::perf_debug::ablated(crate::perf_debug::STR_CREATE);
+        let len = if copy_to_tail {
+            s.as_wtf8().len()
+        } else {
+            s.as_wtf8().as_bytes().to_vec().len()
+        };
+        let extra = len + 1;
         let r = PyRef::<PyStr>::new_ref_with_extra(
             s,
             self.types.str_type.to_owned(),
@@ -516,8 +521,11 @@ impl Context {
                 + 16
                 + core::mem::size_of::<PyStr>();
             let tail = struct_end as *mut u8;
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), tail, bytes.len());
-            *tail.add(bytes.len()) = 0; // NUL terminator
+            // Copy straight from the payload's bytes instead of staging a
+            // temporary Vec; the tail is disjoint from the payload storage.
+            let src = r.as_wtf8().as_bytes().as_ptr();
+            core::ptr::copy_nonoverlapping(src, tail, len);
+            *tail.add(len) = 0; // NUL terminator
         }
         r
     }
