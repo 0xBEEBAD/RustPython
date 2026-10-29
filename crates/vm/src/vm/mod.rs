@@ -119,28 +119,6 @@ pub struct VirtualMachine {
 
 /// Non-owning frame pointer for the non-unix threading frames stack.
 /// The pointed-to frame is kept alive by the caller of with_frame/resume_gen_frame.
-/// Unix threading builds publish the top frame through `ThreadSlot::top_frame`
-/// and walk the rest via `FrameObject::previous`, so they do not use this type.
-#[cfg(all(not(unix), feature = "threading"))]
-#[derive(Copy, Clone)]
-pub struct FramePtr(NonNull<Py<FrameObject>>);
-
-#[cfg(all(not(unix), feature = "threading"))]
-impl FramePtr {
-    /// # Safety
-    /// The pointed-to frame must still be alive.
-    #[must_use]
-    pub unsafe fn as_ref(&self) -> &Py<FrameObject> {
-        unsafe { self.0.as_ref() }
-    }
-}
-
-// SAFETY: FramePtr is only stored in a thread's shared frame stack
-// (`ThreadSlot::frames`) while the corresponding FrameObjectRef is alive on that
-// thread's call stack; readers dereference it under the slot mutex.
-#[cfg(all(not(unix), feature = "threading"))]
-unsafe impl Send for FramePtr {}
-
 #[derive(Debug)]
 struct ExceptionStack {
     /// Linked list of handled-exception slots (`_PyErr_StackItem` chain).
@@ -2214,8 +2192,6 @@ impl VirtualMachine {
             self.recursion_depth.update(|d| d.saturating_sub(1))
         });
 
-        #[cfg(all(not(unix), feature = "threading"))]
-        crate::vm::thread::push_thread_frame(FramePtr(NonNull::from(&*frame)));
         let iframe = frame.iframe() as *const crate::frame::InterpreterFrame;
         let old_chain = crate::vm::thread::set_current_frame(iframe);
         {
@@ -2278,8 +2254,6 @@ impl VirtualMachine {
                 .store(0, core::sync::atomic::Ordering::Relaxed);
         }
         let _ = crate::vm::thread::set_current_frame(old_chain);
-        #[cfg(all(not(unix), feature = "threading"))]
-        crate::vm::thread::pop_thread_frame();
         // Disarm the panic guard — normal decrement.
         scopeguard::ScopeGuard::into_inner(_depth_guard);
         self.recursion_depth.update(|d| d - 1);
@@ -2475,8 +2449,6 @@ impl VirtualMachine {
         self.recursion_depth.update(|d| d + 1);
 
         // SAFETY: frame (&FrameObjectRef) stays alive for the duration, so NonNull is valid until pop.
-        #[cfg(all(not(unix), feature = "threading"))]
-        crate::vm::thread::push_thread_frame(FramePtr(NonNull::from(&**frame)));
         let iframe = frame.iframe() as *const crate::frame::InterpreterFrame;
         let old_chain = crate::vm::thread::set_current_frame(iframe);
         {
@@ -2507,8 +2479,6 @@ impl VirtualMachine {
                 frame.iframe().previous.store(0, core::sync::atomic::Ordering::Relaxed);
             }
             let _ = crate::vm::thread::set_current_frame(old_chain);
-            #[cfg(all(not(unix), feature = "threading"))]
-            crate::vm::thread::pop_thread_frame();
 
             self.recursion_depth.update(|d| d - 1);
         }

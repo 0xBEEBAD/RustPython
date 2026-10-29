@@ -6620,16 +6620,21 @@ impl ExecutingFrame<'_> {
                     && cls.slots.vectorcall.load().is_some()
                 {
                     let nargs_usize = nargs as usize;
-                    // One pass: drain the positional args, then prepend
-                    // self_or_null (if any) into the reserved slot.
-                    let mut args_vec = Vec::with_capacity(nargs_usize + 1);
-                    args_vec.extend(self.pop_multiple(nargs_usize));
+                    // Drain the positional args, then prepend self_or_null (if
+                    // any). A zero-argument call (`object()`, `set()`, ...) ends
+                    // up with `Vec::new()` here, i.e. no allocation at all.
+                    let args: Vec<PyObjectRef> = self.pop_multiple(nargs_usize).collect();
                     let self_or_null = self.pop_value_opt();
                     let callable = self.pop_value();
                     let self_is_some = self_or_null.is_some();
-                    if let Some(self_val) = self_or_null {
-                        args_vec.insert(0, self_val);
-                    }
+                    let args_vec = if let Some(self_val) = self_or_null {
+                        let mut with_self = Vec::with_capacity(args.len() + 1);
+                        with_self.push(self_val);
+                        with_self.extend(args);
+                        with_self
+                    } else {
+                        args
+                    };
                     let result = callable.vectorcall(
                         args_vec,
                         nargs_usize + usize::from(self_is_some),
@@ -8908,87 +8913,38 @@ impl ExecutingFrame<'_> {
 
     #[cfg_attr(feature = "flame-it", flame("FrameObject"))]
     fn execute_bin_op(&mut self, vm: &VirtualMachine, op: bytecode::BinaryOperator) -> FrameResult {
-        let b_ref = &self.pop_value();
-        let a_ref = &self.pop_value();
+        let mut b_ref = self.pop_stackref();
+        let mut a_ref = self.pop_stackref();
+
+        // Exact-type fast paths run on borrowed stack refs: they never call user
+        // code, so the operands cannot be deallocated underneath them and the
+        // two promote/drop refcount pairs per operand are avoided.
+        if let Some(value) =
+            Self::bin_op_exact_fast(a_ref.as_object(), b_ref.as_object(), op, vm)
+        {
+            self.push_value(value);
+            return Ok(None);
+        }
+
+        // The generic protocol call may run arbitrary Python code that drops the
+        // source locals, so promote both operands to owned refs first.
+        a_ref.promote();
+        b_ref.promote();
+        let (a_ref, b_ref) = (&*a_ref, &*b_ref);
         let value = match op {
-            // Exact-int fast paths for +, -, *, //, %: bypass binary_op1
-            // dispatch and use i64 arithmetic when possible to avoid BigInt
-            // heap allocation, falling back to the slow path otherwise.
-            bytecode::BinaryOperator::Add | bytecode::BinaryOperator::InplaceAdd => {
-                if let (Some(a), Some(b)) = (
-                    a_ref.downcast_ref_if_exact::<PyInt>(vm),
-                    b_ref.downcast_ref_if_exact::<PyInt>(vm),
-                ) {
-                    Ok(Self::int_add(a.as_bigint(), b.as_bigint(), vm))
-                } else if matches!(op, bytecode::BinaryOperator::Add) {
-                    vm._add(a_ref, b_ref)
-                } else {
-                    vm._iadd(a_ref, b_ref)
-                }
-            }
-            bytecode::BinaryOperator::Subtract | bytecode::BinaryOperator::InplaceSubtract => {
-                if let (Some(a), Some(b)) = (
-                    a_ref.downcast_ref_if_exact::<PyInt>(vm),
-                    b_ref.downcast_ref_if_exact::<PyInt>(vm),
-                ) {
-                    Ok(Self::int_sub(a.as_bigint(), b.as_bigint(), vm))
-                } else if matches!(op, bytecode::BinaryOperator::Subtract) {
-                    vm._sub(a_ref, b_ref)
-                } else {
-                    vm._isub(a_ref, b_ref)
-                }
-            }
-            bytecode::BinaryOperator::Multiply | bytecode::BinaryOperator::InplaceMultiply => {
-                if let (Some(a), Some(b)) = (
-                    a_ref.downcast_ref_if_exact::<PyInt>(vm),
-                    b_ref.downcast_ref_if_exact::<PyInt>(vm),
-                ) {
-                    Ok(Self::int_mul(a.as_bigint(), b.as_bigint(), vm))
-                } else if matches!(op, bytecode::BinaryOperator::Multiply) {
-                    vm._mul(a_ref, b_ref)
-                } else {
-                    vm._imul(a_ref, b_ref)
-                }
-            }
+            bytecode::BinaryOperator::Add => vm._add(a_ref, b_ref),
+            bytecode::BinaryOperator::InplaceAdd => vm._iadd(a_ref, b_ref),
+            bytecode::BinaryOperator::Subtract => vm._sub(a_ref, b_ref),
+            bytecode::BinaryOperator::InplaceSubtract => vm._isub(a_ref, b_ref),
+            bytecode::BinaryOperator::Multiply => vm._mul(a_ref, b_ref),
+            bytecode::BinaryOperator::InplaceMultiply => vm._imul(a_ref, b_ref),
             bytecode::BinaryOperator::MatrixMultiply => vm._matmul(a_ref, b_ref),
             bytecode::BinaryOperator::Power => vm._pow(a_ref, b_ref, vm.ctx.none.as_object()),
             bytecode::BinaryOperator::TrueDivide => vm._truediv(a_ref, b_ref),
-            bytecode::BinaryOperator::FloorDivide
-            | bytecode::BinaryOperator::InplaceFloorDivide => {
-                if let (Some(a), Some(b)) = (
-                    a_ref.downcast_ref_if_exact::<PyInt>(vm),
-                    b_ref.downcast_ref_if_exact::<PyInt>(vm),
-                ) && let Some(result) = Self::int_floordiv(a.as_bigint(), b.as_bigint(), vm)
-                {
-                    Ok(result)
-                } else if matches!(op, bytecode::BinaryOperator::FloorDivide) {
-                    vm._floordiv(a_ref, b_ref)
-                } else {
-                    vm._ifloordiv(a_ref, b_ref)
-                }
-            }
-            bytecode::BinaryOperator::Remainder | bytecode::BinaryOperator::InplaceRemainder => {
-                // CPython optimization: `"%s" % exact_str` returns the str
-                // directly without creating a new object.
-                if let Some(fmt) = a_ref.downcast_ref_if_exact::<PyStr>(vm)
-                    && fmt.as_wtf8().as_bytes() == b"%s"
-                    && let Some(arg_str) = b_ref.downcast_ref_if_exact::<PyStr>(vm)
-                {
-                    self.push_value(b_ref.to_owned());
-                    return Ok(None);
-                }
-                if let (Some(a), Some(b)) = (
-                    a_ref.downcast_ref_if_exact::<PyInt>(vm),
-                    b_ref.downcast_ref_if_exact::<PyInt>(vm),
-                ) && let Some(result) = Self::int_mod(a.as_bigint(), b.as_bigint(), vm)
-                {
-                    Ok(result)
-                } else if matches!(op, bytecode::BinaryOperator::Remainder) {
-                    vm._mod(a_ref, b_ref)
-                } else {
-                    vm._imod(a_ref, b_ref)
-                }
-            }
+            bytecode::BinaryOperator::FloorDivide => vm._floordiv(a_ref, b_ref),
+            bytecode::BinaryOperator::InplaceFloorDivide => vm._ifloordiv(a_ref, b_ref),
+            bytecode::BinaryOperator::Remainder => vm._mod(a_ref, b_ref),
+            bytecode::BinaryOperator::InplaceRemainder => vm._imod(a_ref, b_ref),
             bytecode::BinaryOperator::Lshift => vm._lshift(a_ref, b_ref),
             bytecode::BinaryOperator::Rshift => vm._rshift(a_ref, b_ref),
             bytecode::BinaryOperator::Xor => vm._xor(a_ref, b_ref),
@@ -9009,6 +8965,97 @@ impl ExecutingFrame<'_> {
 
         self.push_value(value);
         Ok(None)
+    }
+
+    /// Exact-type arithmetic that cannot invoke user code. Returns `None` when
+    /// the operands are not exact builtin numbers, leaving the caller to use
+    /// the generic protocol path.
+    #[inline]
+    fn bin_op_exact_fast(
+        a: &PyObject,
+        b: &PyObject,
+        op: bytecode::BinaryOperator,
+        vm: &VirtualMachine,
+    ) -> Option<PyObjectRef> {
+        use bytecode::BinaryOperator as Op;
+        match op {
+            Op::Add | Op::InplaceAdd => {
+                if let (Some(a), Some(b)) = (
+                    a.downcast_ref_if_exact::<PyInt>(vm),
+                    b.downcast_ref_if_exact::<PyInt>(vm),
+                ) {
+                    Some(Self::int_add(a.as_bigint(), b.as_bigint(), vm))
+                } else if let (Some(a), Some(b)) = (
+                    a.downcast_ref_if_exact::<PyFloat>(vm),
+                    b.downcast_ref_if_exact::<PyFloat>(vm),
+                ) {
+                    Some(vm.ctx.new_float(a.to_f64() + b.to_f64()).into())
+                } else {
+                    None
+                }
+            }
+            Op::Subtract | Op::InplaceSubtract => {
+                if let (Some(a), Some(b)) = (
+                    a.downcast_ref_if_exact::<PyInt>(vm),
+                    b.downcast_ref_if_exact::<PyInt>(vm),
+                ) {
+                    Some(Self::int_sub(a.as_bigint(), b.as_bigint(), vm))
+                } else if let (Some(a), Some(b)) = (
+                    a.downcast_ref_if_exact::<PyFloat>(vm),
+                    b.downcast_ref_if_exact::<PyFloat>(vm),
+                ) {
+                    Some(vm.ctx.new_float(a.to_f64() - b.to_f64()).into())
+                } else {
+                    None
+                }
+            }
+            Op::Multiply | Op::InplaceMultiply => {
+                if let (Some(a), Some(b)) = (
+                    a.downcast_ref_if_exact::<PyInt>(vm),
+                    b.downcast_ref_if_exact::<PyInt>(vm),
+                ) {
+                    Some(Self::int_mul(a.as_bigint(), b.as_bigint(), vm))
+                } else if let (Some(a), Some(b)) = (
+                    a.downcast_ref_if_exact::<PyFloat>(vm),
+                    b.downcast_ref_if_exact::<PyFloat>(vm),
+                ) {
+                    Some(vm.ctx.new_float(a.to_f64() * b.to_f64()).into())
+                } else {
+                    None
+                }
+            }
+            Op::FloorDivide | Op::InplaceFloorDivide => {
+                if let (Some(a), Some(b)) = (
+                    a.downcast_ref_if_exact::<PyInt>(vm),
+                    b.downcast_ref_if_exact::<PyInt>(vm),
+                ) {
+                    // `None` here (e.g. division by zero) must take the slow
+                    // path so the proper exception is raised.
+                    Self::int_floordiv(a.as_bigint(), b.as_bigint(), vm)
+                } else {
+                    None
+                }
+            }
+            Op::Remainder | Op::InplaceRemainder => {
+                // CPython optimization: `"%s" % exact_str` returns the str
+                // directly without creating a new object.
+                if let Some(fmt) = a.downcast_ref_if_exact::<PyStr>(vm)
+                    && fmt.as_wtf8().as_bytes() == b"%s"
+                    && let Some(arg_str) = b.downcast_ref_if_exact::<PyStr>(vm)
+                {
+                    return Some(arg_str.to_owned().into());
+                }
+                if let (Some(a), Some(b)) = (
+                    a.downcast_ref_if_exact::<PyInt>(vm),
+                    b.downcast_ref_if_exact::<PyInt>(vm),
+                ) {
+                    Self::int_mod(a.as_bigint(), b.as_bigint(), vm)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 
     /// Int binary op with an i64 fast path to avoid BigInt heap allocation.

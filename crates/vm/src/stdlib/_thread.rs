@@ -1286,11 +1286,10 @@ pub(crate) mod _thread {
                             let fo = iframe.materialize(vm);
                             Some((*id, fo.to_owned()))
                         } else {
-                            // Fall back to frames stack for FrameObject-only path
-                            let frames = slot.frames.lock();
-                            frames
-                                .last()
-                                .map(|fp| (*id, unsafe { fp.as_ref() }.to_owned()))
+                            // No published frame for this thread (idle or in
+                            // the tiny window before top_iframe is stored);
+                            // same as unix: report no frame.
+                            None
                         }
                     }
                 })

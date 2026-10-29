@@ -223,8 +223,6 @@ pub struct GcState {
     pub callbacks: PyMutex<Vec<PyObjectRef>>,
     /// Mutex for collection (prevents concurrent collections)
     collecting: PyMutex<()>,
-    /// Allocation counter for gen0
-    alloc_count: AtomicUsize,
 }
 
 // SAFETY: All fields are either inherently Send/Sync (atomics, RwLock, Mutex) or protected by PyMutex.
@@ -261,7 +259,6 @@ impl GcState {
             garbage: PyMutex::new(Vec::new()),
             callbacks: PyMutex::new(Vec::new()),
             collecting: PyMutex::new(()),
-            alloc_count: AtomicUsize::new(0),
         }
     }
 
@@ -338,9 +335,15 @@ impl GcState {
         obj_ref.set_gc_tracked();
         obj_ref.set_gc_generation(0);
 
-        self.generation_lists[0].write().push_front(obj);
-        self.generations[0].count.fetch_add(1, Ordering::SeqCst);
-        self.alloc_count.fetch_add(1, Ordering::SeqCst);
+        let mut list = self.generation_lists[0].write();
+        list.push_front(obj);
+        // Every writer of the gen0 allocation counter holds that list's write
+        // lock (track, gen0 untrack, collection reset), so a relaxed load+store
+        // is enough and keeps a lock-prefixed RMW out of every tracked
+        // allocation. Readers (`maybe_collect`, `gc.get_count`) only use it as a
+        // threshold heuristic.
+        let count = self.generations[0].count.load(Ordering::Relaxed);
+        self.generations[0].count.store(count + 1, Ordering::Relaxed);
     }
 
     /// Untrack an object (remove from GC lists).
@@ -374,11 +377,23 @@ impl GcState {
                 // Rule D: deallocation decrements the generation-0 allocation
                 // counter only, regardless of which generation the object lived
                 // in (CPython `_PyObject_GC_Del`), saturating at zero.
-                let _ = self.generations[0].count.fetch_update(
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                    |c| if c > 0 { Some(c - 1) } else { None },
-                );
+                if obj_gen == 0 {
+                    // This guard *is* the gen0 list lock, so the counter can be
+                    // updated without a locked RMW (see `track_object`).
+                    let count = self.generations[0].count.load(Ordering::Relaxed);
+                    if count > 0 {
+                        self.generations[0].count.store(count - 1, Ordering::Relaxed);
+                    }
+                } else {
+                    // Older generations must not lock gen0 here (promotion takes
+                    // the lists in ascending order), so this rarer path keeps the
+                    // atomic RMW.
+                    let _ = self.generations[0].count.fetch_update(
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                        |c| if c > 0 { Some(c - 1) } else { None },
+                    );
+                }
                 obj_ref.clear_gc_tracked();
                 obj_ref.set_gc_generation(GC_UNTRACKED);
             } else {
@@ -558,10 +573,13 @@ impl GcState {
         if generation + 1 < 3 {
             self.generations[generation + 1]
                 .count
-                .fetch_add(1, Ordering::SeqCst);
+                .fetch_add(1, Ordering::Relaxed);
         }
         for i in 0..=generation {
-            self.generations[i].count.store(0, Ordering::SeqCst);
+            // Zeroed under the generation list's write lock: that lock is what
+            // serializes every writer of the gen0 counter (see `track_object`).
+            let _guard = self.generation_lists[i].write();
+            self.generations[i].count.store(0, Ordering::Relaxed);
         }
 
         // Step 1: Gather objects from generations 0..=generation
