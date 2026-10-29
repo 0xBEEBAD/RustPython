@@ -6716,14 +6716,24 @@ impl ExecutingFrame<'_> {
                             .str_find
                             .as_ref()
                             .is_some_and(|f| callable.is(f));
+                        let is_rfind = vm
+                            .callable_cache
+                            .str_rfind
+                            .as_ref()
+                            .is_some_and(|f| callable.is(f));
                         let is_startswith = vm
                             .callable_cache
                             .str_startswith
                             .as_ref()
                             .is_some_and(|f| callable.is(f));
+                        let is_endswith = vm
+                            .callable_cache
+                            .str_endswith
+                            .as_ref()
+                            .is_some_and(|f| callable.is(f));
                         if self_or_null_is_some
                             && !crate::perf_debug::ablated(crate::perf_debug::STR_METHOD)
-                            && (is_find || is_startswith)
+                            && (is_find || is_rfind || is_startswith || is_endswith)
                         {
                             let result = {
                                 let receiver = self
@@ -6740,8 +6750,14 @@ impl ExecutingFrame<'_> {
                                     (Some(s), Some(n)) if is_find => {
                                         Some(vm.ctx.new_int(s.find_single(n.to_owned())).into())
                                     }
-                                    (Some(s), Some(n)) => {
+                                    (Some(s), Some(n)) if is_rfind => {
+                                        Some(vm.ctx.new_int(s.rfind_single(n.to_owned())).into())
+                                    }
+                                    (Some(s), Some(n)) if is_startswith => {
                                         Some(vm.ctx.new_bool(s.startswith_str(n)).into())
+                                    }
+                                    (Some(s), Some(n)) => {
+                                        Some(vm.ctx.new_bool(s.endswith_str(n)).into())
                                     }
                                     _ => None,
                                 }

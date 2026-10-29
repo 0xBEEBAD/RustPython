@@ -1533,6 +1533,17 @@ impl PyStr {
         self.as_wtf8().starts_with(affix.as_wtf8())
     }
 
+    /// `str.endswith(sub)` counterpart of `startswith_str`.
+    pub(crate) fn endswith_str(&self, affix: &PyStr) -> bool {
+        self.as_wtf8().ends_with(affix.as_wtf8())
+    }
+
+    /// `str.rfind(sub)` with no start/end arguments.
+    pub(crate) fn rfind_single(&self, sub: PyStrRef) -> isize {
+        self._find(FindArgs { sub, start: None, end: None }, Wtf8::rfind)
+            .map_or(-1, |v| v as isize)
+    }
+
     /// `str.find(sub)` with no start/end arguments, for the call-specialization
     /// fast path.
     pub(crate) fn find_single(&self, sub: PyStrRef) -> isize {
