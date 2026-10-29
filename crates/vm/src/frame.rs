@@ -2644,6 +2644,51 @@ fn slice_bound_isize_ref(obj: &PyObject, vm: &VirtualMachine) -> Option<Option<i
         .map(Some)
 }
 
+/// Subscripts on exact builtin containers with exact index operands, done
+/// without entering the generic mapping protocol. Returns `None` whenever the
+/// shape is not one of them (or the lookup would raise), so the caller falls
+/// back to the generic path and its error handling.
+#[inline]
+fn exact_subscript(
+    container: &PyObject,
+    key: &PyObject,
+    vm: &VirtualMachine,
+) -> Option<PyObjectRef> {
+    if let Some(result) = str_slice_exact_subscript(container, key, vm) {
+        return Some(result);
+    }
+    use num_traits::ToPrimitive;
+    if let Some(index) = key
+        .downcast_ref_if_exact::<PyInt>(vm)
+        .and_then(|i| i.as_bigint().to_isize())
+    {
+        let element = if let Some(list) = container.downcast_ref_if_exact::<PyList>(vm) {
+            let items = list.borrow_vec();
+            let len = items.len() as isize;
+            let idx = if index < 0 { index + len } else { index };
+            (idx >= 0 && idx < len).then(|| items[idx as usize].clone())
+        } else if let Some(tuple) = container.downcast_ref_if_exact::<PyTuple>(vm) {
+            let items = tuple.as_slice();
+            let len = items.len() as isize;
+            let idx = if index < 0 { index + len } else { index };
+            (idx >= 0 && idx < len).then(|| items[idx as usize].clone())
+        } else {
+            None
+        };
+        if element.is_some() {
+            return element;
+        }
+        return None;
+    }
+    if let Some(dict) = container.downcast_ref_if_exact::<PyDict>(vm)
+        && let Some(key) = key.downcast_ref_if_exact::<PyStr>(vm)
+        && let Ok(Some(value)) = dict.get_item_opt_hint(key, 0, vm)
+    {
+        return Some(value);
+    }
+    None
+}
+
 /// Exact-`str` subscript with an exact `slice` object of exact-int bounds and
 /// step 1: compute the character range without touching the generic mapping
 /// protocol. Returns `None` for any other shape so the caller falls back.
@@ -9332,7 +9377,7 @@ impl ExecutingFrame<'_> {
                 }
             }
             Op::Subscr if !crate::perf_debug::ablated(crate::perf_debug::SLICE_FAST) => {
-                str_slice_exact_subscript(a, b, vm)
+                exact_subscript(a, b, vm)
             }
             Op::Remainder | Op::InplaceRemainder => {
                 // CPython optimization: `"%s" % exact_str` returns the str
