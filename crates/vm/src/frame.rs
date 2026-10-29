@@ -7764,7 +7764,10 @@ impl ExecutingFrame<'_> {
                         range_iter.fast_next()
                     };
                     if let Some(value) = value {
-                        self.push_value(vm.ctx.new_int(value).into());
+                        let obj: PyObjectRef = vm.ctx.new_int(value).into();
+                        if let Err(obj) = self.for_iter_store_fast(obj, vm) {
+                            self.push_value(obj);
+                        }
                     } else {
                         self.for_iter_jump_on_exhausted(target);
                     }
@@ -7786,7 +7789,9 @@ impl ExecutingFrame<'_> {
                         list_iter.fast_next()
                     };
                     if let Some(value) = value {
-                        self.push_value(value);
+                        if let Err(value) = self.for_iter_store_fast(value, vm) {
+                            self.push_value(value);
+                        }
                     } else {
                         self.for_iter_jump_on_exhausted(target);
                     }
@@ -7807,7 +7812,9 @@ impl ExecutingFrame<'_> {
                         tuple_iter.fast_next()
                     };
                     if let Some(value) = value {
-                        self.push_value(value);
+                        if let Err(value) = self.for_iter_store_fast(value, vm) {
+                            self.push_value(value);
+                        }
                     } else {
                         self.for_iter_jump_on_exhausted(target);
                     }
@@ -12114,6 +12121,43 @@ impl ExecutingFrame<'_> {
     #[allow(dead_code)]
     unsafe fn push_borrowed(&mut self, obj: &PyObject) {
         self.push_stackref_opt(Some(unsafe { PyStackRef::new_borrowed(obj) }));
+    }
+
+    /// If the instruction after the current one is a plain `STORE_FAST`, store
+    /// `value` into that local and skip the instruction. Loop bodies compiled
+    /// from `for x in ...:` begin with `FOR_ITER` + `STORE_FAST`, so this
+    /// removes one dispatch and one eval-stack round-trip per iteration.
+    /// `STORE_FAST` cannot raise or run Python code, so nothing can observe
+    /// the skipped instruction except tracing and monitoring, which fall back
+    /// to the split path.
+    #[inline]
+    fn for_iter_store_fast(
+        &mut self,
+        value: PyObjectRef,
+        vm: &VirtualMachine,
+    ) -> Result<(), PyObjectRef> {
+        if vm.use_tracing.get() || vm.state.monitoring_events.load() != 0 {
+            return Err(value);
+        }
+        let next_idx =
+            self.lasti() as usize + Instruction::from(Opcode::ForIter).cache_entries();
+        let Some(unit) = self.code.instructions.get(next_idx) else {
+            return Err(value);
+        };
+        // A plain STORE_FAST directly after FOR_ITER always carries its local
+        // index in the instruction's own byte (an EXTENDED_ARG would have been
+        // a separate instruction in between), and StoreFast is never quickened.
+        if matches!(unit.op, Instruction::StoreFast { .. }) {
+            let idx = usize::from(u8::from(unit.arg));
+            // SAFETY: bytecode compiler guarantees var_num < nlocals.
+            let slot = unsafe { self.localsplus.fastlocals_mut().get_unchecked_mut(idx) };
+            *slot = Some(value);
+            self.lasti
+                .store((next_idx + 1) as u32, atomic::Ordering::Relaxed);
+            Ok(())
+        } else {
+            Err(value)
+        }
     }
 
     #[inline]
