@@ -9,6 +9,7 @@
 //! * `classcall` - disable the no-`__init__` class-call fast path
 //! * `strmethod` - disable the exact-str method kernels
 //! * `strcreate` - stage string creation through a temporary buffer
+//! * `split` - disable the single-byte-separator split fast path
 
 use std::sync::OnceLock;
 
@@ -18,6 +19,7 @@ pub(crate) const ZERO_ARG: u8 = 8;
 pub(crate) const CLASS_CALL: u8 = 16;
 pub(crate) const STR_METHOD: u8 = 32;
 pub(crate) const STR_CREATE: u8 = 64;
+pub(crate) const SPLIT: u8 = 128;
 
 /// True when the named optimization is ablated through `LUNA_ABLATE`.
 pub(crate) fn ablated(bit: u8) -> bool {
@@ -33,6 +35,7 @@ pub(crate) fn ablated(bit: u8) -> bool {
                     "classcall" => CLASS_CALL,
                     "strmethod" => STR_METHOD,
                     "strcreate" => STR_CREATE,
+                    "split" => SPLIT,
                     _ => 0,
                 };
             }

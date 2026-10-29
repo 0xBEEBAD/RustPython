@@ -197,6 +197,17 @@ impl Wtf8Concat for Py<PyStr> {
     }
 }
 
+/// Materialize one split/partition piece: single bytes come from the latin-1
+/// cache, short pieces live in the header, longer ones get a single box.
+#[inline]
+fn ascii_piece(piece: &[u8], vm: &VirtualMachine) -> PyObjectRef {
+    if let [byte] = piece {
+        return vm.ctx.latin1_char(*byte).into();
+    }
+    let piece = unsafe { AsciiStr::from_ascii_unchecked(piece) };
+    PyStr::from(piece).into_ref(&vm.ctx).into()
+}
+
 impl<'a> From<&'a AsciiStr> for PyStr {
     fn from(s: &'a AsciiStr) -> Self {
         // Short ASCII strings live entirely in the header: no allocation.
@@ -921,21 +932,34 @@ impl PyStr {
                 vm,
                 || zelf.as_object().to_owned(),
                 |v, s, vm| {
-                    v.as_bytes()
+                    let bytes = v.as_bytes();
+                    let sep = s.as_bytes();
+                    // Single-byte separator: count the pieces up front so the
+                    // result vector is allocated once, and build each piece
+                    // without the generic string-creation path.
+                    if sep.len() == 1 && !crate::perf_debug::ablated(crate::perf_debug::SPLIT) {
+                        let sep_byte = sep[0];
+                        let pieces = bytes.iter().filter(|&&b| b == sep_byte).count() + 1;
+                        let mut out = Vec::with_capacity(pieces);
+                        for piece in bytes.split(|&b| b == sep_byte) {
+                            out.push(ascii_piece(piece, vm));
+                        }
+                        return out;
+                    }
+                    bytes
                         .split_str(s)
-                        .map(|s| unsafe { AsciiStr::from_ascii_unchecked(s) }.to_pyobject(vm))
+                        .map(|s| ascii_piece(s, vm))
                         .collect()
                 },
                 |v, s, n, vm| {
                     v.as_bytes()
                         .splitn_str(n, s)
-                        .map(|s| unsafe { AsciiStr::from_ascii_unchecked(s) }.to_pyobject(vm))
+                        .map(|s| ascii_piece(s, vm))
                         .collect()
                 },
                 |v, n, vm| {
-                    v.as_bytes().py_split_whitespace(n, |s| {
-                        unsafe { AsciiStr::from_ascii_unchecked(s) }.to_pyobject(vm)
-                    })
+                    v.as_bytes()
+                        .py_split_whitespace(n, |s| ascii_piece(s, vm))
                 },
             ),
             PyKindStr::Utf8(s) => s.py_split(
