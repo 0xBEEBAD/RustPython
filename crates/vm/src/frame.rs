@@ -2619,6 +2619,67 @@ const NO_INIT_FLAG: u32 = 1 << 31;
 /// Conservative check used at specialization time: any `__abstractmethods__`
 /// attribute disables the no-`__init__` class-call fast path (the generic
 /// `slot_new` path runs the precise non-empty check).
+/// `Some(None)` for `None`, `Some(Some(v))` for an exact int that fits `isize`,
+/// and `None` when the bound must go through the generic slice path.
+#[inline]
+fn slice_bound_isize(obj: &PyObjectRef, vm: &VirtualMachine) -> Option<Option<isize>> {
+    use num_traits::ToPrimitive;
+    if obj.is(&vm.ctx.none) {
+        return Some(None);
+    }
+    obj.downcast_ref_if_exact::<PyInt>(vm)
+        .and_then(|i| i.as_bigint().to_isize())
+        .map(Some)
+}
+
+/// Same, for a borrowed slice bound (e.g. a constant `slice` object's fields).
+#[inline]
+fn slice_bound_isize_ref(obj: &PyObject, vm: &VirtualMachine) -> Option<Option<isize>> {
+    use num_traits::ToPrimitive;
+    if obj.is(&vm.ctx.none) {
+        return Some(None);
+    }
+    obj.downcast_ref_if_exact::<PyInt>(vm)
+        .and_then(|i| i.as_bigint().to_isize())
+        .map(Some)
+}
+
+/// Exact-`str` subscript with an exact `slice` object of exact-int bounds and
+/// step 1: compute the character range without touching the generic mapping
+/// protocol. Returns `None` for any other shape so the caller falls back.
+#[inline]
+fn str_slice_exact_subscript(
+    container: &PyObject,
+    slice: &PyObject,
+    vm: &VirtualMachine,
+) -> Option<PyObjectRef> {
+    let s = container.downcast_ref_if_exact::<PyStr>(vm)?;
+    let slice = slice.downcast_ref_if_exact::<PySlice>(vm)?;
+    let start = match &slice.start {
+        None => Some(None),
+        Some(value) => slice_bound_isize_ref(value, vm),
+    }?;
+    let stop = slice_bound_isize_ref(&slice.stop, vm)?;
+    let step = match &slice.step {
+        None => Some(None),
+        Some(value) => slice_bound_isize_ref(value, vm),
+    }?;
+    if step.unwrap_or(1) != 1 {
+        return None;
+    }
+    let saturated = crate::sliceable::SaturatedSlice::from_parts(
+        start.unwrap_or(0),
+        stop.unwrap_or(isize::MAX),
+        1,
+    );
+    let len = s.char_len();
+    let (range, _, _) = saturated.adjust_indices(len);
+    if range.start == 0 && range.end == len {
+        return Some(container.to_owned());
+    }
+    Some(PyStr::from(s.do_slice(range)).into_ref(&vm.ctx).into())
+}
+
 fn type_has_abstract_methods(cls: &Py<PyType>, vm: &VirtualMachine) -> bool {
     cls.get_attr(identifier!(vm, __abstractmethods__)).is_some()
 }
@@ -3584,6 +3645,32 @@ impl ExecutingFrame<'_> {
                 let stop = self.pop_value();
                 let start = self.pop_value();
                 let container = self.pop_value();
+                // Exact-str receiver with exact-int (or None) bounds: the slice
+                // object would only be unpacked again, so compute the character
+                // range directly.
+                if !crate::perf_debug::ablated(crate::perf_debug::SLICE_FAST)
+                    && let Some(s) = container.downcast_ref_if_exact::<PyStr>(vm)
+                    && let (Some(start_i), Some(stop_i)) =
+                        (slice_bound_isize(&start, vm), slice_bound_isize(&stop, vm))
+                {
+                    let slice = crate::sliceable::SaturatedSlice::from_parts(
+                        start_i.unwrap_or(0),
+                        stop_i.unwrap_or(isize::MAX),
+                        1,
+                    );
+                    let len = s.char_len();
+                    let (range, _, _) = slice.adjust_indices(len);
+                    if range.start == 0 && range.end == len {
+                        // A full slice returns the receiver itself, like CPython
+                        // (and costs no allocation).
+                        drop(s);
+                        self.push_value(container);
+                    } else {
+                        let value = s.do_slice(range);
+                        self.push_value(PyStr::from(value).into_ref(&vm.ctx).into());
+                    }
+                    return Ok(None);
+                }
                 let slice: PyObjectRef = PySlice {
                     start: Some(start),
                     stop,
@@ -9176,6 +9263,9 @@ impl ExecutingFrame<'_> {
                 } else {
                     None
                 }
+            }
+            Op::Subscr if !crate::perf_debug::ablated(crate::perf_debug::SLICE_FAST) => {
+                str_slice_exact_subscript(a, b, vm)
             }
             Op::Remainder | Op::InplaceRemainder => {
                 // CPython optimization: `"%s" % exact_str` returns the str
