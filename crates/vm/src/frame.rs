@@ -3095,17 +3095,17 @@ impl ExecutingFrame<'_> {
                             // Check if the exception already has traceback entries before
                             // we add ours. If it does, it was propagated from a callee
                             // function and we should not re-contextualize it.
-                            let had_prior_traceback = exception.__traceback__().is_some();
+                            // The same handle is the `next` link of the new entry.
+                            let prior_tb = exception.__traceback__();
+                            let had_prior_traceback = prior_tb.is_some();
 
                             // PyTraceBack_Here always adds a new entry without
                             // checking for duplicates. Each time an exception passes through
                             // a frame (e.g., in a loop with repeated raise statements),
                             // a new traceback entry is added.
                             if let Some((loc, _end_loc)) = frame.code.locations.get(idx) {
-                                let next = exception.__traceback__();
-
                                 let new_traceback = PyTraceback::new(
-                                    next,
+                                    prior_tb,
                                     frame.frame_object(vm),
                                     idx as u32 * 2,
                                     loc.line,
@@ -4784,8 +4784,16 @@ impl ExecutingFrame<'_> {
             }
             Instruction::RaiseVarargs { argc: kind } => self.execute_raise(vm, kind.get(arg)),
             Instruction::Resume { .. } | Instruction::ResumeCheck => {
-                // Lazy quickening: initialize adaptive counters on first execution
-                if !self.code.quickened.swap(true, atomic::Ordering::Relaxed) {
+                // Lazy quickening: initialize adaptive counters on first
+                // execution. The load-check keeps a locked RMW off every
+                // frame entry; only the very first run swaps.
+                let first_run = if crate::perf_debug::ablated(crate::perf_debug::QUICKENED) {
+                    !self.code.quickened.swap(true, atomic::Ordering::Relaxed)
+                } else {
+                    !self.code.quickened.load(atomic::Ordering::Relaxed)
+                        && !self.code.quickened.swap(true, atomic::Ordering::Relaxed)
+                };
+                if first_run {
                     self.code.instructions.quicken();
                     atomic::fence(atomic::Ordering::Release);
                 }
@@ -6283,6 +6291,34 @@ impl ExecutingFrame<'_> {
                     .is_some();
                 let effective_nargs = nargs + u32::from(self_or_null_is_some);
                 let callable = self.nth_value(nargs + 1);
+                // `next(it)` is the iterator hot path (generators especially):
+                // dispatch straight to the iterator protocol instead of going
+                // through the native-call machinery. Tracing must still see
+                // c_call/c_return, so it falls back to the generic path.
+                if nargs == 1
+                    && !crate::perf_debug::ablated(crate::perf_debug::NEXT_FAST)
+                    && !self_or_null_is_some
+                    && !vm.use_tracing.get()
+                    && vm
+                        .callable_cache
+                        .next
+                        .as_ref()
+                        .is_some_and(|next_fn| callable.is(next_fn))
+                {
+                    let iterator = self.pop_value();
+                    self.pop_value_opt(); // null self slot
+                    self.pop_value(); // callable (borrowed from the cache)
+                    if !PyIter::check(&iterator) {
+                        return Err(vm.new_type_error(format!(
+                            "{} object is not an iterator",
+                            iterator.class().name()
+                        )));
+                    }
+                    let iter_ret = PyIter::new(iterator).next(vm)?;
+                    let result = iter_ret.to_pyresult(vm);
+                    self.push_value(result?);
+                    return Ok(None);
+                }
                 if let Some(native) = callable.downcast_ref_if_exact::<PyNativeFunction>(vm) {
                     let call_conv = native.value.flags
                         & (PyMethodFlags::VARARGS
@@ -6810,24 +6846,25 @@ impl ExecutingFrame<'_> {
                     return self.execute_call_vectorcall(nargs, vm);
                 }
                 let nargs_usize = nargs as usize;
+                let total_nargs = nargs_usize + usize::from(self_or_null_is_some);
                 // One pass: drain the positional args, then prepend
                 // self_or_null (if any). One spare slot is reserved so a
-                // bound native method can prepend its `self` in place.
-                let mut args_vec = Vec::with_capacity(
-                    nargs_usize + usize::from(self_or_null_is_some) + 1,
-                );
+                // bound native method can prepend its `self` in place; a
+                // zero-argument call needs no allocation at all.
+                let mut args_vec = if total_nargs == 0
+                    && !crate::perf_debug::ablated(crate::perf_debug::ZERO_ARG)
+                {
+                    Vec::new()
+                } else {
+                    Vec::with_capacity(total_nargs + 1)
+                };
                 args_vec.extend(self.pop_multiple(nargs_usize));
                 let self_or_null = self.pop_value_opt();
                 let callable = self.pop_value();
                 if let Some(self_val) = self_or_null {
                     args_vec.insert(0, self_val);
                 }
-                let result = callable.vectorcall(
-                    args_vec,
-                    nargs_usize + usize::from(self_or_null_is_some),
-                    None,
-                    vm,
-                )?;
+                let result = callable.vectorcall(args_vec, total_nargs, None, vm)?;
                 self.push_value(result);
                 Ok(None)
             }

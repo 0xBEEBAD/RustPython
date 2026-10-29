@@ -74,6 +74,8 @@ pub mod import;
 mod intern;
 pub mod iter;
 pub mod object;
+// Temporary bisection switches for performance work (see the module docs).
+mod perf_debug;
 
 #[cfg(feature = "host_env")]
 pub mod ospath;

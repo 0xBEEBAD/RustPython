@@ -20,6 +20,9 @@ pub struct PyTraceback {
 pub(crate) type PyTracebackRef = PyRef<PyTraceback>;
 
 impl PyPayload for PyTraceback {
+    // No freelist: caching traceback husks broke thread teardown in this
+    // interpreter (a blocking pipe read in a worker thread never saw EOF),
+    // so tracebacks are allocated and freed normally.
     #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {
         ctx.types.traceback_type

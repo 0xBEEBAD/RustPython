@@ -719,6 +719,9 @@ pub(crate) struct CallableCache {
     pub list_append: Option<PyObjectRef>,
     pub builtin_all: Option<PyObjectRef>,
     pub builtin_any: Option<PyObjectRef>,
+    /// The builtin `next`. `CALL` specializations compare against it to invoke
+    /// the iterator protocol directly, without the native-call machinery.
+    pub next: Option<PyObjectRef>,
 }
 
 pub struct PyGlobalState {
@@ -868,6 +871,7 @@ impl VirtualMachine {
         self.callable_cache.list_append = Some(list_append);
         self.callable_cache.builtin_all = Some(self.builtins.get_attr("all", self)?);
         self.callable_cache.builtin_any = Some(self.builtins.get_attr("any", self)?);
+        self.callable_cache.next = Some(self.builtins.get_attr("next", self)?);
         Ok(())
     }
 
