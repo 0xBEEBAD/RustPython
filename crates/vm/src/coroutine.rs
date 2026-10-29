@@ -290,6 +290,10 @@ impl Coro {
         // to a sub-iterator cannot observe GeneratorExit -- resuming it would
         // only unwind -- so mark it closed and release the locals directly.
         if !crate::perf_debug::ablated(crate::perf_debug::GEN_CLOSE)
+            // A tracer or an active sys.monitoring tool observes the
+            // GeneratorExit unwinding out of the frame.
+            && !vm.use_tracing.get()
+            && vm.state.monitoring_events.load() == 0
             && !self.frame.iframe().code().has_exc_handling
             && self.frame.yield_from_target().is_none()
         {
