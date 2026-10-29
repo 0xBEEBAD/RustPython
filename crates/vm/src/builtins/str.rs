@@ -1426,6 +1426,29 @@ impl PyStr {
                 return Some(PyStr::from(data).into_ref(&vm.ctx));
             }
         }
+        // All-ASCII separator and pieces: assemble one exactly-sized buffer and
+        // hand it straight to the string constructor.
+        if !crate::perf_debug::ablated(crate::perf_debug::JOIN)
+            && sep.str_kind() == StrKind::Ascii
+        {
+            let mut out: Vec<u8> = Vec::with_capacity(total);
+            let mut all_ascii = true;
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.extend_from_slice(sep.as_bytes());
+                }
+                let s = item.downcast_ref_if_exact::<Self>(vm).unwrap();
+                if s.kind() != StrKind::Ascii {
+                    all_ascii = false;
+                    break;
+                }
+                out.extend_from_slice(s.as_wtf8().as_bytes());
+            }
+            if all_ascii {
+                // SAFETY: every appended byte came from ASCII strings.
+                return Some(unsafe { PyStr::new_ascii_unchecked(out) }.into_ref(&vm.ctx));
+            }
+        }
         let mut buf = Wtf8Buf::with_capacity(total);
         for (i, item) in items.iter().enumerate() {
             if i > 0 {
