@@ -4967,18 +4967,25 @@ impl ExecutingFrame<'_> {
                 let exc_type = self.pop_value();
                 let exc = self.top_value();
 
-                // Validate that exc_type inherits from BaseException
+                // Validate that exc_type inherits from BaseException. CPython uses
+                // a plain subtype check here (no __subclasscheck__ hook).
+                let base = vm.ctx.exceptions.base_exception_type.as_object();
+                let inherits_base = |obj: &PyObjectRef| -> PyResult<bool> {
+                    if let Some(typ) = obj.downcast_ref::<PyType>() {
+                        Ok(typ.fast_issubclass(base))
+                    } else {
+                        obj.is_subclass(base, vm)
+                    }
+                };
                 if let Some(tuple_of_exceptions) = exc_type.downcast_ref::<PyTuple>() {
                     for exception in tuple_of_exceptions {
-                        if !exception
-                            .is_subclass(vm.ctx.exceptions.base_exception_type.into(), vm)?
-                        {
+                        if !inherits_base(exception)? {
                             return Err(vm.new_type_error(
                                 "catching classes that do not inherit from BaseException is not allowed",
                             ));
                         }
                     }
-                } else if !exc_type.is_subclass(vm.ctx.exceptions.base_exception_type.into(), vm)? {
+                } else if !inherits_base(&exc_type)? {
                     return Err(vm.new_type_error(
                         "catching classes that do not inherit from BaseException is not allowed",
                     ));
