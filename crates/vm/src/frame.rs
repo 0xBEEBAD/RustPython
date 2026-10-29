@@ -6709,17 +6709,23 @@ impl ExecutingFrame<'_> {
                             .as_ref()
                             .is_some_and(|self_obj| self_obj.class().is(descr.objclass))
                     {
-                        // str.find(one exact-str argument) without the argument
-                        // vector and generic binding.
+                        // str.find / str.startswith with one exact-str argument,
+                        // without the argument vector and generic binding.
+                        let is_find = vm
+                            .callable_cache
+                            .str_find
+                            .as_ref()
+                            .is_some_and(|f| callable.is(f));
+                        let is_startswith = vm
+                            .callable_cache
+                            .str_startswith
+                            .as_ref()
+                            .is_some_and(|f| callable.is(f));
                         if self_or_null_is_some
                             && !crate::perf_debug::ablated(crate::perf_debug::STR_METHOD)
-                            && vm
-                                .callable_cache
-                                .str_find
-                                .as_ref()
-                                .is_some_and(|f| callable.is(f))
+                            && (is_find || is_startswith)
                         {
-                            let value = {
+                            let result = {
                                 let receiver = self
                                     .localsplus
                                     .stack_index(self_index)
@@ -6731,15 +6737,20 @@ impl ExecutingFrame<'_> {
                                     .as_ref()
                                     .and_then(|o| o.downcast_ref_if_exact::<PyStr>(vm));
                                 match (receiver, needle) {
-                                    (Some(s), Some(n)) => Some(s.find_single(n.to_owned())),
+                                    (Some(s), Some(n)) if is_find => {
+                                        Some(vm.ctx.new_int(s.find_single(n.to_owned())).into())
+                                    }
+                                    (Some(s), Some(n)) => {
+                                        Some(vm.ctx.new_bool(s.startswith_str(n)).into())
+                                    }
                                     _ => None,
                                 }
                             };
-                            if let Some(value) = value {
+                            if let Some(value) = result {
                                 self.pop_value(); // argument
                                 self.pop_value_opt(); // self
                                 self.pop_value(); // callable
-                                self.push_value(vm.ctx.new_int(value).into());
+                                self.push_value(value);
                                 return Ok(None);
                             }
                         }

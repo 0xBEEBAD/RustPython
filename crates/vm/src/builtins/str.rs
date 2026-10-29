@@ -1527,6 +1527,12 @@ impl PyStr {
         self._find(args, Wtf8::find).map_or(-1, |v| v as isize)
     }
 
+    /// `str.startswith(sub)` with a single exact-str affix and no bounds, for
+    /// the call-specialization fast path.
+    pub(crate) fn startswith_str(&self, affix: &PyStr) -> bool {
+        self.as_wtf8().starts_with(affix.as_wtf8())
+    }
+
     /// `str.find(sub)` with no start/end arguments, for the call-specialization
     /// fast path.
     pub(crate) fn find_single(&self, sub: PyStrRef) -> isize {

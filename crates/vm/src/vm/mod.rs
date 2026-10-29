@@ -726,6 +726,7 @@ pub(crate) struct CallableCache {
     pub str_upper: Option<PyObjectRef>,
     pub str_lower: Option<PyObjectRef>,
     pub str_find: Option<PyObjectRef>,
+    pub str_startswith: Option<PyObjectRef>,
     /// Builtin exception types that use the plain BaseException constructor
     /// unchanged (no custom __init__/__new__), for direct construction.
     pub plain_exceptions: Vec<PyObjectRef>,
@@ -885,6 +886,11 @@ impl VirtualMachine {
         self.callable_cache.str_upper = str_upper;
         self.callable_cache.str_lower = str_lower;
         self.callable_cache.str_find = str_find;
+        self.callable_cache.str_startswith = self
+            .ctx
+            .types
+            .str_type
+            .get_attr(self.ctx.intern_str("startswith"));
         let exc = &self.ctx.exceptions;
         self.callable_cache.plain_exceptions = [
             exc.value_error,
