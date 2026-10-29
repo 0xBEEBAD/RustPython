@@ -7838,7 +7838,9 @@ impl ExecutingFrame<'_> {
                     }
                     match generator.as_coro().send_none(iter, vm) {
                         Ok(PyIterReturn::Return(value)) => {
-                            self.push_value(value);
+                            if let Err(value) = self.for_iter_store_fast(value, vm) {
+                                self.push_value(value);
+                            }
                         }
                         Ok(PyIterReturn::StopIteration(value)) => {
                             if vm.use_tracing.get() && self.trace_is_set(vm) {
