@@ -901,6 +901,8 @@ impl VirtualMachine {
             exc.stop_iteration,
         ]
         .into_iter()
+        // A larger payload (e.g. StopIteration) needs its own constructor.
+        .filter(|t| t.slots.basicsize == core::mem::size_of::<crate::builtins::PyBaseException>())
         .map(|t| t.to_owned().into())
         .collect();
         Ok(())
