@@ -286,6 +286,21 @@ impl Coro {
             self.closed.store(true);
             return Ok(vm.ctx.none());
         }
+        // Fast path: a frame with no exception handling that is not delegating
+        // to a sub-iterator cannot observe GeneratorExit -- resuming it would
+        // only unwind -- so mark it closed and release the locals directly.
+        if !crate::perf_debug::ablated(crate::perf_debug::GEN_CLOSE)
+            && !self.frame.iframe().code().has_exc_handling
+            && self.frame.yield_from_target().is_none()
+        {
+            self.closed.store(true);
+            self.frame
+                .iframe()
+                .owner
+                .store(FrameOwner::FrameObject as i8, core::sync::atomic::Ordering::Release);
+            self.clear_frame_locals_on_close();
+            return Ok(vm.ctx.none());
+        }
         let result = self.run_claimed(&claim, vm, |f| {
             f.gen_throw(
                 vm,
