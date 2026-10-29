@@ -2611,6 +2611,18 @@ const BINARY_OP_EXTEND_EXTERNAL_CACHE_OFFSET: usize = 1;
 /// exact-args call fast paths; larger arities fall back to a heap buffer.
 const MAX_INLINE_CALL_ARGS: usize = 8;
 
+/// High bit of the `CallAllocAndEnterInit` type-version cache word marking a
+/// class with no Python-level `__init__` (the call only allocates). Type
+/// version tags are small counters, so the bit is free.
+const NO_INIT_FLAG: u32 = 1 << 31;
+
+/// Conservative check used at specialization time: any `__abstractmethods__`
+/// attribute disables the no-`__init__` class-call fast path (the generic
+/// `slot_new` path runs the precise non-empty check).
+fn type_has_abstract_methods(cls: &Py<PyType>, vm: &VirtualMachine) -> bool {
+    cls.get_attr(identifier!(vm, __abstractmethods__)).is_some()
+}
+
 /// Staging buffer for exact-args call fast paths: fixed-size inline storage
 /// for small arities, avoiding a per-call Vec allocation.
 enum CallArgBuffer {
@@ -6685,7 +6697,9 @@ impl ExecutingFrame<'_> {
             Instruction::CallAllocAndEnterInit => {
                 let instr_idx = self.lasti() as usize - 1;
                 let cache_base = instr_idx + 1;
-                let cached_version = self.code.instructions.read_cache_u32(cache_base + 1);
+                let cached_raw = self.code.instructions.read_cache_u32(cache_base + 1);
+                let no_init_site = cached_raw & NO_INIT_FLAG != 0;
+                let cached_version = cached_raw & !NO_INIT_FLAG;
                 let nargs: u32 = arg.into();
                 let callable = self.nth_value(nargs + 1);
                 let stack_len = self.localsplus.stack_len();
@@ -6693,6 +6707,24 @@ impl ExecutingFrame<'_> {
                     .localsplus
                     .stack_index(stack_len - nargs as usize - 1)
                     .is_some();
+                // No Python-level __init__ and no arguments: allocate and skip
+                // the object.__init__ trampoline entirely.
+                if no_init_site
+                    && !self.specialization_eval_frame_active(vm)
+                    && !self_or_null_is_some
+                    && nargs == 0
+                    && cached_version != 0
+                    && let Some(cls) = callable.downcast_ref::<PyType>()
+                    && cls.tp_version_tag.load(Acquire) == cached_version
+                    && let Some(cls_alloc) = cls.slots.alloc.load()
+                {
+                    let cls_ref = cls.to_owned();
+                    let new_obj = cls_alloc(cls_ref, 0, vm)?;
+                    let _ = self.pop_value_opt(); // self_or_null (null)
+                    let _ = self.pop_value(); // callable
+                    self.push_value(new_obj);
+                    return Ok(None);
+                }
                 if !self.specialization_eval_frame_active(vm)
                     && !self_or_null_is_some
                     && cached_version != 0
@@ -10772,6 +10804,35 @@ impl ExecutingFrame<'_> {
                             self.code
                                 .instructions
                                 .write_cache_u32(cache_base + 1, type_version);
+                        }
+                        self.specialize_at(
+                            instr_idx,
+                            cache_base,
+                            Instruction::CallAllocAndEnterInit,
+                        );
+                        return;
+                    }
+
+                    // No Python-level `__init__` (the type inherits
+                    // object.__init__) and no positional arguments: the call is
+                    // just an allocation. Abstract types are excluded here and
+                    // the type version guard covers later __init__/__new__/
+                    // __abstractmethods__ changes.
+                    if nargs == 0
+                        && !crate::perf_debug::ablated(crate::perf_debug::CLASS_CALL)
+                        && let Some(init) = cls.get_attr(identifier!(vm, __init__))
+                        && let Some(object_init) = vm
+                            .ctx
+                            .types
+                            .object_type
+                            .get_attr(identifier!(vm, __init__))
+                        && init.is(&object_init)
+                        && !type_has_abstract_methods(cls, vm)
+                    {
+                        unsafe {
+                            self.code
+                                .instructions
+                                .write_cache_u32(cache_base + 1, type_version | NO_INIT_FLAG);
                         }
                         self.specialize_at(
                             instr_idx,
