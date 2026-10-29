@@ -98,10 +98,13 @@ impl Constructor for PyBaseObject {
 pub(crate) fn generic_alloc(cls: PyTypeRef, _nitems: usize, vm: &VirtualMachine) -> PyResult {
     // Only create dict if the class has HAS_DICT flag (i.e., __slots__ was not defined
     // or __dict__ is in __slots__)
+    // Instances start without a dict object; one is materialized on the first
+    // attribute write or __dict__ access (see InstanceDict::get_or_insert).
     let dict = if cls
         .slots
         .flags
         .has_feature(crate::types::PyTypeFlags::HAS_DICT)
+        && crate::perf_debug::ablated(crate::perf_debug::LAZY_DICT)
     {
         Some(vm.ctx.new_dict())
     } else {
