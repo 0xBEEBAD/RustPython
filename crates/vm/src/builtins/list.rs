@@ -979,6 +979,39 @@ fn do_sort(
         }
     }
 
+    // Fast path: no key_func, all exact floats without NaN.
+    // Same rationale as the int path above: no per-comparison downcast, no
+    // PyResult plumbing, and a stable native sort. NaN is excluded because
+    // Python's timsort uses a plain `<` predicate whose ordering for NaNs
+    // `partial_cmp` cannot reproduce, so such lists fall through to timsort.
+    if key_func.is_none() && !reverse {
+        let mut compact: Vec<(f64, PyObjectRef)> = Vec::with_capacity(values.len());
+        let mut all_floats = true;
+        for v in values.iter() {
+            match v.downcast_ref_if_exact::<PyFloat>(vm) {
+                Some(f) => {
+                    let x = f.to_f64();
+                    if x.is_nan() {
+                        all_floats = false;
+                        break;
+                    }
+                    compact.push((x, v.clone()));
+                }
+                None => {
+                    all_floats = false;
+                    break;
+                }
+            }
+        }
+        if all_floats {
+            // `sort_by` is stable, matching `list.sort` semantics for e.g.
+            // -0.0 == 0.0 and distinct objects holding equal values.
+            compact.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(core::cmp::Ordering::Equal));
+            *values = compact.into_iter().map(|(_, obj)| obj).collect();
+            return Ok(());
+        }
+    }
+
     if let Some(ref key_func) = key_func {
         let mut items = values
             .iter()

@@ -896,17 +896,87 @@ impl Py<PyFunction> {
     ) -> PyResult {
         debug_assert_eq!(args.len(), self.code.arg_count as usize);
 
-        let taken = args
-            .iter_mut()
-            .map(|slot| slot.take().expect("arg slot must be filled"));
         // Generator/coroutine code objects are SIMPLE_FUNCTION in call
         // specialization classification, but their call path must still
-        // go through invoke() to produce generator/coroutine objects.
+        // produce generator/coroutine objects. When the call shape is a plain
+        // exact positional call, build the heap frame and fill fastlocals
+        // straight from the slots: no FuncArgs, no argument Vec, and no
+        // generic binding machinery.
         if self.is_generator_like() {
+            if !vm.use_tracing.get() && self.has_simple_exact_args(args.len() as u32) {
+                return self.invoke_generator_exact_args(args, vm);
+            }
+            let taken = args
+                .iter_mut()
+                .map(|slot| slot.take().expect("arg slot must be filled"));
             let args: Vec<PyObjectRef> = taken.collect();
             return self.invoke(FuncArgs::from(args), vm);
         }
+        let taken = args
+            .iter_mut()
+            .map(|slot| slot.take().expect("arg slot must be filled"));
         self.invoke_prepared_exact_args(taken, vm)
+    }
+
+    /// Whether the code object takes exactly `arg_count` positional arguments
+    /// with no defaults, keyword-only arguments, or varargs unpacking, so a
+    /// call can fill fastlocals directly.
+    pub(crate) fn has_simple_exact_args(&self, nargs: u32) -> bool {
+        let code: &Py<PyCode> = &self.code;
+        code.flags.contains(bytecode::CodeFlags::OPTIMIZED)
+            && !code
+                .flags
+                .intersects(bytecode::CodeFlags::VARARGS | bytecode::CodeFlags::VARKEYWORDS)
+            && code.kwonlyarg_count == 0
+            && code.arg_count == nargs
+    }
+
+    /// Create the generator/coroutine for an exact positional-argument call.
+    ///
+    /// Equivalent to `invoke` for a code object with `has_simple_exact_args`
+    /// and `args.len() == code.arg_count`, but binds arguments by writing
+    /// straight into the new frame's fastlocals.
+    fn invoke_generator_exact_args(
+        &self,
+        args: &mut [Option<PyObjectRef>],
+        vm: &VirtualMachine,
+    ) -> PyResult {
+        let code: &Py<PyCode> = &self.code;
+        debug_assert!(
+            code.flags.intersects(
+                bytecode::CodeFlags::GENERATOR
+                    | bytecode::CodeFlags::COROUTINE
+                    | bytecode::CodeFlags::ASYNC_GENERATOR
+            ),
+            "invoke_generator_exact_args requires a generator-like code object"
+        );
+        debug_assert_eq!(args.len(), code.arg_count as usize);
+        debug_assert!(self.has_simple_exact_args(args.len() as u32));
+
+        let locals = if code.flags.contains(bytecode::CodeFlags::NEWLOCALS) {
+            None
+        } else {
+            Some(ArgMapping::from_dict_exact(self.globals.clone()))
+        };
+
+        let frame = FrameObject::new_ref(
+            (*code).to_owned(),
+            Scope::new(locals, self.globals.clone()),
+            self.builtins.clone(),
+            self.closure.as_ref().map_or(&[], |c| c.as_slice()),
+            Some(self.to_owned().into()),
+            false, // generator/coroutine frames are never data-stack backed
+            vm,
+        );
+
+        {
+            let fastlocals = unsafe { frame.fastlocals_mut() };
+            for (slot, arg) in fastlocals.iter_mut().zip(args.iter_mut()) {
+                *slot = arg.take();
+            }
+        }
+
+        Ok(self.make_generator_or_coro(frame, vm))
     }
 }
 
