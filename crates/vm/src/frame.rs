@@ -4520,28 +4520,7 @@ impl ExecutingFrame<'_> {
                                 fastlocals.get_unchecked(idx1.as_usize()).as_ref(),
                                 fastlocals.get_unchecked(idx2.as_usize()).as_ref(),
                             ) {
-                                (Some(x1), Some(x2)) => match (
-                                    x1.downcast_ref_if_exact::<PyInt>(vm),
-                                    x2.downcast_ref_if_exact::<PyInt>(vm),
-                                ) {
-                                    (Some(a), Some(b)) => {
-                                        let (a, b) = (a.as_bigint(), b.as_bigint());
-                                        use bytecode::BinaryOperator as Op;
-                                        match op {
-                                            Op::Add | Op::InplaceAdd => {
-                                                Some(Self::int_add(a, b, vm))
-                                            }
-                                            Op::Subtract | Op::InplaceSubtract => {
-                                                Some(Self::int_sub(a, b, vm))
-                                            }
-                                            Op::Multiply | Op::InplaceMultiply => {
-                                                Some(Self::int_mul(a, b, vm))
-                                            }
-                                            _ => None,
-                                        }
-                                    }
-                                    _ => None,
-                                },
+                                (Some(x1), Some(x2)) => Self::fused_pair_binop(x1, x2, op, vm),
                                 _ => None,
                             }
                         }
@@ -10855,6 +10834,54 @@ impl ExecutingFrame<'_> {
     /// Execute a specialized binary op on two int operands.
     /// Fallback to generic binary op if either operand is not an exact int.
     #[inline]
+    /// Exact-type operand pair for the fused load+binop dispatches. Returns
+    /// `None` when the pair needs the generic slot machinery (user `__add__`,
+    /// mixed types, unsupported operator), which the caller then runs by
+    /// falling back to the unfused instruction pair.
+    #[inline]
+    fn fused_pair_binop(
+        a: &PyObjectRef,
+        b: &PyObjectRef,
+        op: bytecode::BinaryOperator,
+        vm: &VirtualMachine,
+    ) -> Option<PyObjectRef> {
+        use bytecode::BinaryOperator as Op;
+        if let (Some(x), Some(y)) = (
+            a.downcast_ref_if_exact::<PyInt>(vm),
+            b.downcast_ref_if_exact::<PyInt>(vm),
+        ) {
+            let (x, y) = (x.as_bigint(), y.as_bigint());
+            return Some(match op {
+                Op::Add | Op::InplaceAdd => Self::int_add(x, y, vm),
+                Op::Subtract | Op::InplaceSubtract => Self::int_sub(x, y, vm),
+                Op::Multiply | Op::InplaceMultiply => Self::int_mul(x, y, vm),
+                _ => return None,
+            });
+        }
+        if let (Some(x), Some(y)) = (
+            a.downcast_ref_if_exact::<PyFloat>(vm),
+            b.downcast_ref_if_exact::<PyFloat>(vm),
+        ) {
+            let (x, y) = (x.to_f64(), y.to_f64());
+            let r = match op {
+                Op::Add | Op::InplaceAdd => x + y,
+                Op::Subtract | Op::InplaceSubtract => x - y,
+                Op::Multiply | Op::InplaceMultiply => x * y,
+                _ => return None,
+            };
+            return Some(vm.ctx.new_float(r).into());
+        }
+        if matches!(op, Op::Add | Op::InplaceAdd) {
+            if let (Some(x), Some(y)) = (
+                a.downcast_ref_if_exact::<PyStr>(vm),
+                b.downcast_ref_if_exact::<PyStr>(vm),
+            ) {
+                return Some(x.as_wtf8().py_add(y.as_wtf8()).to_pyobject(vm));
+            }
+        }
+        None
+    }
+
     fn execute_binary_op_int(
         &mut self,
         vm: &VirtualMachine,
