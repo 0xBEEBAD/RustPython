@@ -1,6 +1,6 @@
 use super::{
-    IterStatus, PositionIterInternal, PyBaseExceptionRef, PyGenericAlias, PyMappingProxy, PySet,
-    PyStr, PyStrRef, PyTupleRef, PyType, PyTypeRef, set, set::PySetInner,
+    IterStatus, PositionIterInternal, PyBaseExceptionRef, PyFrozenDict, PyGenericAlias,
+    PyMappingProxy, PySet, PyStr, PyStrRef, PyTupleRef, PyType, PyTypeRef, set, set::PySetInner,
 };
 use crate::common::lock::LazyLock;
 use crate::object::{Traverse, TraverseFn};
@@ -91,6 +91,17 @@ impl PyDict {
     /// PyDict instead of using this
     pub(crate) const fn _as_dict_inner(&self) -> &DictContentType {
         &self.entries
+    }
+
+    /// Build a payload from an already-populated dictionary storage.
+    pub(crate) const fn from_entries(entries: DictContentType) -> Self {
+        Self { entries }
+    }
+
+    /// Consume the payload and return its dictionary storage, e.g. to move
+    /// entries into another dict-like payload.
+    pub(crate) fn into_entries(self) -> DictContentType {
+        self.entries
     }
 
     /// Monotonically increasing version for mutation tracking.
@@ -395,6 +406,21 @@ impl PyDict {
                 Ok(pydict.into_pyref().into())
             }
             Err(pyobj) => {
+                // A constructor override may return a frozendict. Build the
+                // keys in a mutable copy and hand the result back to the
+                // class, matching CPython's _PyDict_FromKeys.
+                if let Some(fd) = pyobj.downcast_ref::<PyFrozenDict>() {
+                    let tmp = Self::from_entries(fd._as_frozen_entries().clone());
+                    for key in iterable.iter(vm)? {
+                        tmp.inner_setitem(&*key?, value.clone(), vm)?;
+                    }
+                    let arg = PyFrozenDict::new(tmp.into_entries()).into_pyobject(vm);
+                    let args = FuncArgs {
+                        args: vec![arg],
+                        ..Default::default()
+                    };
+                    return PyType::call(&class, args, vm);
+                }
                 for key in iterable.iter(vm)? {
                     pyobj.set_item(&*key?, value.clone(), vm)?;
                 }
@@ -1268,7 +1294,7 @@ macro_rules! dict_view {
 
         #[pyclass(flags(DISALLOW_INSTANTIATION), with(IterNext, Iterable))]
         impl $iter_name {
-            fn new(dict: PyDictRef) -> Self {
+            pub(crate) fn new(dict: PyDictRef) -> Self {
                 $iter_name {
                     size: dict.size(),
                     internal: PyMutex::new(PositionIterInternal::new(dict, 0)),
@@ -1376,7 +1402,7 @@ macro_rules! dict_view {
 
         #[pyclass(flags(DISALLOW_INSTANTIATION), with(IterNext, Iterable))]
         impl $reverse_iter_name {
-            fn new(dict: PyDictRef) -> Self {
+            pub(crate) fn new(dict: PyDictRef) -> Self {
                 let size = dict.size();
                 let position = size.entries_size.saturating_sub(1);
                 $reverse_iter_name {
@@ -1809,6 +1835,17 @@ fn dict_unhashable_error(
     key: &PyObject,
     err: PyBaseExceptionRef,
 ) -> PyBaseExceptionRef {
+    mapping_unhashable_error(vm, key, err, "dict")
+}
+
+/// Map a `TypeError` raised while hashing a lookup key to CPython's
+/// `cannot use '<type>' as a <mapping> key (<original message>)` form.
+pub(crate) fn mapping_unhashable_error(
+    vm: &VirtualMachine,
+    key: &PyObject,
+    err: PyBaseExceptionRef,
+    mapping: &str,
+) -> PyBaseExceptionRef {
     if !err.fast_isinstance(vm.ctx.exceptions.type_error) {
         return err;
     }
@@ -1818,7 +1855,7 @@ fn dict_unhashable_error(
         .and_then(|arg| arg.str(vm).ok())
         .map_or_else(String::new, |s| s.to_string());
     vm.new_type_error(format!(
-        "cannot use '{}' as a dict key ({detail})",
+        "cannot use '{}' as a {mapping} key ({detail})",
         key.class().name()
     ))
 }

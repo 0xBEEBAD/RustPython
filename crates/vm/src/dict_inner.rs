@@ -1230,6 +1230,19 @@ impl<T: Clone> Dict<T> {
             .collect()
     }
 
+    /// All items paired with the key hash stored in their entry, for hashing
+    /// without re-calling `__hash__`.
+    pub(crate) fn items_with_hashes(&self) -> Vec<(PyObjectRef, HashValue, T)> {
+        self.read()
+            .entries
+            .iter()
+            .filter_map(|v| {
+                v.as_ref()
+                    .map(|v| (v.key.clone(), v.hash, v.value.clone()))
+            })
+            .collect()
+    }
+
     pub(crate) fn try_fold_keys<Acc, Fold>(&self, init: Acc, f: Fold) -> PyResult<Acc>
     where
         Fold: FnMut(Acc, &PyObject) -> PyResult<Acc>,
