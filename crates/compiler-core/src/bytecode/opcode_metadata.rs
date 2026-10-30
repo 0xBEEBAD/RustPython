@@ -245,6 +245,9 @@ impl super::Opcode {
             Some(super::Opcode::UnpackSequence),
             Some(super::Opcode::UnpackSequence),
             Some(super::Opcode::UnpackSequence),
+            // LoadSmallIntBinaryOp (212) is compiler-emitted, not a runtime
+            // specialization, so it has no deopt target: codegen rejects any
+            // instruction with one while computing stack effects.
             None,
             None,
             None,
@@ -350,6 +353,7 @@ impl super::Opcode {
                 | Self::LoadGlobal
                 | Self::LoadName
                 | Self::LoadSmallInt
+                | Self::LoadSmallIntBinaryOp
                 | Self::LoadSpecial
                 | Self::LoadSuperAttr
                 | Self::MakeCell
@@ -701,6 +705,9 @@ impl super::Opcode {
             Self::LoadGlobal => (1 + (oparg & 1), 0),
             Self::LoadName => (1, 0),
             Self::LoadSmallInt => (1, 0),
+            // Behaves like LOAD_SMALL_INT statically: the retained BINARY_OP
+            // unit that follows supplies the matching -1 stack effect.
+            Self::LoadSmallIntBinaryOp => (1, 0),
             Self::LoadSpecial => (2, 1),
             Self::LoadSuperAttr => (1 + (oparg & 1), 3),
             Self::MakeCell => (0, 0),

@@ -4444,6 +4444,57 @@ impl ExecutingFrame<'_> {
                 self.push_value(value.into());
                 Ok(None)
             }
+            Instruction::LoadSmallIntBinaryOp { .. } => {
+                // Fused `LOAD_SMALL_INT n; BINARY_OP op`: the constant is the
+                // arg byte (as for LOAD_SMALL_INT) and `op` is read from the
+                // retained BINARY_OP unit that immediately follows. That unit
+                // is never executed and is skipped together with its caches,
+                // so `co_code`/deoptimization stay identical to the split pair.
+                let small = u32::from(arg) & 0xff;
+                let binop_idx = self.lasti() as usize;
+                let op = bytecode::BinaryOperator::try_from(
+                    self.code.instructions.read_arg(binop_idx).as_u8(),
+                )
+                .unwrap_or(bytecode::BinaryOperator::Add);
+                let skipped = 1 + Opcode::BinaryOp.cache_entries();
+
+                if !vm.use_tracing.get() && vm.state.monitoring_events.load() == 0 {
+                    let a = self.top_value();
+                    if let Some(a_int) = a.downcast_ref_if_exact::<PyInt>(vm) {
+                        let b = BigInt::from(small);
+                        use bytecode::BinaryOperator as Op;
+                        let result = match op {
+                            Op::Add | Op::InplaceAdd => {
+                                Some(Self::int_add(a_int.as_bigint(), &b, vm))
+                            }
+                            Op::Subtract | Op::InplaceSubtract => {
+                                Some(Self::int_sub(a_int.as_bigint(), &b, vm))
+                            }
+                            Op::Multiply | Op::InplaceMultiply => {
+                                Some(Self::int_mul(a_int.as_bigint(), &b, vm))
+                            }
+                            _ => None,
+                        };
+                        if let Some(result) = result {
+                            self.pop_value();
+                            if let Err(result) =
+                                self.store_result_to_next_local(result, skipped, vm)
+                            {
+                                self.push_value(result);
+                                self.update_lasti(|i| *i += skipped as u32);
+                            }
+                            return Ok(None);
+                        }
+                    }
+                }
+
+                // Fallback: behave exactly like LOAD_SMALL_INT and let the
+                // retained BINARY_OP unit run normally. Keeping the sequence
+                // unfused here preserves opcode-level tracing/monitoring and
+                // error attribution byte-for-byte.
+                self.push_value(vm.ctx.new_int(small as i32).into());
+                Ok(None)
+            }
             Instruction::LoadDeref { i } => {
                 let idx = i.get(arg).as_usize();
                 let x = self

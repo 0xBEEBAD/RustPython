@@ -674,6 +674,17 @@ define_opcodes!(
         UnpackSequenceList = 209,
         UnpackSequenceTuple = 210,
         UnpackSequenceTwoTuple = 211,
+        /// RustPython-only fusion of `LOAD_SMALL_INT` and the `BINARY_OP`
+        /// immediately following it.
+        ///
+        /// The 8-bit arg byte is the small integer constant (0..=255, exactly
+        /// as for `LOAD_SMALL_INT`); the operator is read from the retained
+        /// `BINARY_OP` unit that follows it and that this instruction skips at
+        /// runtime. Deoptimizes to `LOAD_SMALL_INT`, which keeps `co_code`,
+        /// the line table and import/export round trips byte-identical.
+        LoadSmallIntBinaryOp {
+            i: Arg<u32>,
+        } = 212,
         InstrumentedEndFor = 234,
         InstrumentedPopIter = 235,
         InstrumentedEndSend = 236,

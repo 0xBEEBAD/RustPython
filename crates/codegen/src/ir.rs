@@ -2069,6 +2069,7 @@ impl Blocks {
                 }
                 AnyInstruction::Real(Instruction::BinaryOp { .. }) => {
                     fold_const_binop(metadata, &mut self[block_idx], i)?;
+                    self.fuse_small_int_binary_op(block_idx, i);
                 }
                 _ => {}
             }
@@ -2077,6 +2078,65 @@ impl Blocks {
         }
         self[block_idx].apply_static_swaps_block()?;
         Ok(())
+    }
+
+    /// Rewrite `LOAD_SMALL_INT n; BINARY_OP op` into a single
+    /// `LOAD_SMALL_INT_BINARY_OP` dispatch.
+    ///
+    /// The `BINARY_OP` unit is deliberately left in place: it still carries
+    /// the operator (the fused instruction reads its arg byte) and keeps
+    /// `co_code`, the line table and the exception table byte-identical to
+    /// the unfused sequence, because the fused instruction deoptimizes back
+    /// to `LOAD_SMALL_INT`. At runtime the fused arm performs the operation
+    /// and skips the `BINARY_OP` plus its inline cache entries.
+    fn fuse_small_int_binary_op(&mut self, block_idx: BlockIdx, i: usize) {
+        let Some(prev_idx) = i.checked_sub(1) else {
+            return;
+        };
+        let block = &mut self[block_idx];
+        let binop = block.instructions[i];
+        let AnyInstruction::Real(Instruction::BinaryOp { op }) = binop.instr else {
+            return;
+        };
+        let op = op.get(binop.arg);
+        // Only the exact-int fast paths pay for the extra dispatch they remove.
+        if !matches!(
+            op,
+            oparg::BinaryOperator::Add
+                | oparg::BinaryOperator::Subtract
+                | oparg::BinaryOperator::Multiply
+                | oparg::BinaryOperator::InplaceAdd
+                | oparg::BinaryOperator::InplaceSubtract
+                | oparg::BinaryOperator::InplaceMultiply
+        ) {
+            return;
+        }
+        let load = block.instructions[prev_idx];
+        let AnyInstruction::Real(Instruction::LoadSmallInt { i: small_arg }) = load.instr else {
+            return;
+        };
+        let small = small_arg.get(load.arg);
+        if small > u32::from(u8::MAX) {
+            return;
+        }
+        // Keep source locations and exception ranges of the two units
+        // interchangeable: the fused instruction executes at the load's
+        // position but performs the binary operation.
+        if load.instruction_lineno() != binop.instruction_lineno() {
+            return;
+        }
+        let same_handler = match (load.except_handler, binop.except_handler) {
+            (None, None) => true,
+            (Some(a), Some(b)) => {
+                a.handler_block == b.handler_block && a.preserve_lasti == b.preserve_lasti
+            }
+            _ => false,
+        };
+        if !same_handler {
+            return;
+        }
+        block.instructions[prev_idx]
+            .instr_set_op1(Opcode::LoadSmallIntBinaryOp.into(), load.arg);
     }
 
     /// flowgraph.c _PyCfg_ToInstructionSequence
