@@ -55,6 +55,13 @@ pub trait PyPayload: MaybeTraverse + PyThreadingConstraint + Sized + 'static {
     /// which is created untracked and tracked lazily only on escape.
     const NEW_REF_UNTRACKED: bool = false;
 
+    /// Whether instances of this payload can omit the GC prefix when they need
+    /// no instance dict, member slots, weakrefs, or trailing bytes. Such
+    /// allocations keep only the vtable at `ptr - size_of::<usize>()`, which is
+    /// where every existing vtable reader looks. Only safe for payloads that
+    /// are never GC-tracked and never inspect gc_bits/gc_generation.
+    const SLIM_HEADER: bool = false;
+
     /// Whether this type has a freelist. Types with freelists require
     /// immediate (non-deferred) GC untracking during dealloc to prevent
     /// race conditions when the object is reused.

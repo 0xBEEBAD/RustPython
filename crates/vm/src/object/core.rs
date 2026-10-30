@@ -209,7 +209,7 @@ pub(super) unsafe fn default_dealloc<T: PyPayload>(obj: *mut PyObject) {
         return; // deferred to queue
     }
 
-    let vtable = obj_ref.0.gc_prefix().vtable;
+    let vtable = obj_ref.0.vtable();
 
     // Untrack from GC BEFORE deallocation.
     // Must happen before memory is freed because intrusive list removal
@@ -365,6 +365,20 @@ pub(super) struct GcPrefix {
     /// Virtual method table for type dispatch
     pub(super) vtable: &'static PyObjVTable,
 }
+/// Minimal prefix for payloads that need no GC metadata (see
+/// `PyPayload::SLIM_HEADER`). `vtable` occupies the same `ptr - 8` slot as it
+/// does inside `GcPrefix`, so every vtable reader stays layout-agnostic.
+#[repr(C, align(8))]
+pub(super) struct SlimPrefix {
+    pub(super) vtable: &'static PyObjVTable,
+}
+/// Size of the SlimPrefix. Must equal the vtable offset below, which all
+/// readers (including the C-API) use to find the vtable.
+const SIZEOF_SLIMPREFIX: usize = core::mem::size_of::<SlimPrefix>();
+const _: () = assert!(
+    SIZEOF_SLIMPREFIX
+        == core::mem::size_of::<GcPrefix>() - core::mem::offset_of!(GcPrefix, vtable)
+);
 /// Extension fields for objects that need dict or member slots.
 /// Allocated as a prefix before PyInner when needed (prefix allocation pattern).
 /// Access via `PyInner::ext_ref()` using negative offset from the object pointer.
@@ -566,6 +580,23 @@ pub mod foreign_dispatch {
 }
 
 impl<T> PyInner<T> {
+    /// The instance's vtable. Lives at the same `ptr - 8` slot in both the
+    /// full `GcPrefix` and the `SlimPrefix` layouts.
+    #[inline(always)]
+    pub(super) fn vtable(&self) -> &'static PyObjVTable {
+        unsafe {
+            let slot = (self as *const Self as *const u8).sub(GCPREFIX_VTABLE_OFFSET_FROM_PYINNER)
+                as *const &'static PyObjVTable;
+            *slot
+        }
+    }
+
+    /// Whether this allocation carries the full `GcPrefix` (GC fields present).
+    #[inline(always)]
+    pub(super) fn has_gc_prefix(&self) -> bool {
+        self.vtable().has_gc_prefix
+    }
+
     /// Access the GcPrefix allocated before this PyInner.
     /// The GcPrefix is always present (allocated for every object).
     #[inline(always)]
@@ -1295,6 +1326,20 @@ impl<T: PyPayload> PyInner<T> {
                     .unwrap()
                     .0;
             }
+            if !(*ptr).has_gc_prefix() {
+                layout = layout
+                    .extend(core::alloc::Layout::new::<SlimPrefix>())
+                    .unwrap()
+                    .0;
+                let (combined, inner_offset) = layout
+                    .extend(core::alloc::Layout::new::<Self>())
+                    .unwrap();
+                return (
+                    (ptr as *mut u8).sub(inner_offset),
+                    combined.pad_to_align(),
+                    has_ext,
+                );
+            }
             layout = layout
                 .extend(core::alloc::Layout::new::<GcPrefix>())
                 .unwrap()
@@ -1410,10 +1455,30 @@ impl<T: PyPayload + core::fmt::Debug> PyInner<T> {
             None
         };
 
-        let (gc_combined, gc_offset) = layout
-            .extend(core::alloc::Layout::new::<GcPrefix>())
-            .unwrap();
-        layout = gc_combined;
+        // Types that are never GC-tracked and need no prefix payloads may use
+        // the 8-byte SlimPrefix instead of the 40-byte GcPrefix. Heap-type
+        // instances are always tracked (see `new_ref_original`), so they must
+        // keep the full prefix even when the class has no dict or slots.
+        let slim = T::SLIM_HEADER
+            && !T::HAS_TRAVERSE
+            && typ.heaptype_ext.is_none()
+            && !needs_ext
+            && !needs_weakref
+            && extra == 0;
+
+        let prefix_offset = if slim {
+            let (combined, offset) = layout
+                .extend(core::alloc::Layout::new::<SlimPrefix>())
+                .unwrap();
+            layout = combined;
+            offset
+        } else {
+            let (combined, offset) = layout
+                .extend(core::alloc::Layout::new::<GcPrefix>())
+                .unwrap();
+            layout = combined;
+            offset
+        };
 
         let payload_layout = if extra > 0 {
             core::alloc::Layout::from_size_align(
@@ -1449,16 +1514,22 @@ impl<T: PyPayload + core::fmt::Debug> PyInner<T> {
                 weakref_ptr.write(WeakRefList::new());
             }
 
-            // GcPrefix is immediately before PyInner (inner_ptr - sizeof(GcPrefix));
-            // gc_offset is its offset from the allocation start.
-            let gc_ptr = alloc_ptr.add(gc_offset) as *mut GcPrefix;
-            gc_ptr.write(GcPrefix {
-                allocation_extra: extra,
-                gc_bits: Radium::new(0),
-                gc_generation: Radium::new(GC_UNTRACKED),
-                gc_pointers: Pointers::new(),
-                vtable: PyObjVTable::of::<T>(),
-            });
+            // The prefix is immediately before PyInner; its offset is from the
+            // allocation start.
+            let prefix_ptr = alloc_ptr.add(prefix_offset);
+            if slim {
+                (prefix_ptr as *mut SlimPrefix).write(SlimPrefix {
+                    vtable: PyObjVTable::slim_of::<T>(),
+                });
+            } else {
+                (prefix_ptr as *mut GcPrefix).write(GcPrefix {
+                    allocation_extra: extra,
+                    gc_bits: Radium::new(0),
+                    gc_generation: Radium::new(GC_UNTRACKED),
+                    gc_pointers: Pointers::new(),
+                    vtable: PyObjVTable::of::<T>(),
+                });
+            }
 
             let inner_ptr = alloc_ptr.add(inner_offset) as *mut Self;
             inner_ptr.write(Self {
@@ -1831,7 +1902,7 @@ impl PyObject {
     #[deprecated(note = "use downcastable instead")]
     #[inline(always)]
     pub fn payload_is<T: PyPayload>(&self) -> bool {
-        self.0.gc_prefix().vtable.typeid == T::PAYLOAD_TYPE_ID
+        self.0.vtable().typeid == T::PAYLOAD_TYPE_ID
     }
 
     /// Force to return payload as T.
@@ -1914,7 +1985,7 @@ impl PyObject {
 
     #[inline]
     pub(crate) fn typeid(&self) -> TypeId {
-        self.0.gc_prefix().vtable.typeid
+        self.0.vtable().typeid
     }
 
     /// Check if this object can be downcast to T.
@@ -1989,7 +2060,9 @@ impl PyObject {
     /// _PyGC_FINALIZED in Py_GIL_DISABLED mode.
     #[inline]
     pub fn gc_finalized(&self) -> bool {
-        GcBits::from_bits_retain(self.0.gc_prefix().gc_bits.load(Ordering::Relaxed)).contains(GcBits::FINALIZED)
+        self.0.has_gc_prefix()
+            && GcBits::from_bits_retain(self.0.gc_prefix().gc_bits.load(Ordering::Relaxed))
+                .contains(GcBits::FINALIZED)
     }
 
     /// Mark the object as finalized. Should be called before __del__.
@@ -2002,20 +2075,28 @@ impl PyObject {
     /// Set a GC bit atomically.
     #[inline]
     pub(crate) fn set_gc_bit(&self, bit: GcBits) {
-        self.0.gc_prefix().gc_bits.fetch_or(bit.bits(), Ordering::Relaxed);
+        if self.0.has_gc_prefix() {
+            self.0.gc_prefix().gc_bits.fetch_or(bit.bits(), Ordering::Relaxed);
+        }
     }
 
     /// Get the GC generation index for this object.
     #[inline]
     pub(crate) fn gc_generation(&self) -> u8 {
-        self.0.gc_prefix().gc_generation.load(Ordering::Relaxed)
+        if self.0.has_gc_prefix() {
+            self.0.gc_prefix().gc_generation.load(Ordering::Relaxed)
+        } else {
+            crate::object::GC_UNTRACKED
+        }
     }
 
     /// Set the GC generation index for this object.
     /// Must only be called while holding the generation list's write lock.
     #[inline]
     pub(crate) fn set_gc_generation(&self, generation: u8) {
-        self.0.gc_prefix().gc_generation.store(generation, Ordering::Relaxed);
+        if self.0.has_gc_prefix() {
+            self.0.gc_prefix().gc_generation.store(generation, Ordering::Relaxed);
+        }
     }
 
     /// _PyObject_GC_TRACK
@@ -2027,10 +2108,12 @@ impl PyObject {
     /// _PyObject_GC_UNTRACK
     #[inline]
     pub(crate) fn clear_gc_tracked(&self) {
-        self.0
-            .gc_prefix()
-            .gc_bits
-            .fetch_and(!GcBits::TRACKED.bits(), Ordering::Relaxed);
+        if self.0.has_gc_prefix() {
+            self.0
+                .gc_prefix()
+                .gc_bits
+                .fetch_and(!GcBits::TRACKED.bits(), Ordering::Relaxed);
+        }
     }
 
     #[inline(always)] // the outer function is never inlined
@@ -2092,7 +2175,7 @@ impl PyObject {
     /// _Py_Dealloc: dispatch to type's dealloc
     #[inline(never)]
     unsafe fn drop_slow(ptr: NonNull<Self>) {
-        let dealloc = unsafe { ptr.as_ref().0.gc_prefix().vtable.dealloc };
+        let dealloc = unsafe { ptr.as_ref().0.vtable().dealloc };
         unsafe { dealloc(ptr.as_ptr()) }
     }
 
@@ -2136,7 +2219,9 @@ impl PyObject {
 
     /// _PyObject_GC_IS_TRACKED
     pub fn is_gc_tracked(&self) -> bool {
-        GcBits::from_bits_retain(self.0.gc_prefix().gc_bits.load(Ordering::Relaxed)).contains(GcBits::TRACKED)
+        self.0.has_gc_prefix()
+            && GcBits::from_bits_retain(self.0.gc_prefix().gc_bits.load(Ordering::Relaxed))
+                .contains(GcBits::TRACKED)
     }
 
     /// Get the referents (objects directly referenced) of this object.
@@ -2213,7 +2298,7 @@ impl PyObject {
         let obj = unsafe { &*ptr };
 
         // 1. Clear payload-specific references (vtable.clear / tp_clear)
-        if let Some(clear_fn) = obj.0.gc_prefix().vtable.clear {
+        if let Some(clear_fn) = obj.0.vtable().clear {
             unsafe { clear_fn(ptr, &mut result) };
         }
 
@@ -2265,7 +2350,7 @@ impl PyObject {
     /// Check if this object has clear capability (tp_clear)
     // Py_TPFLAGS_HAVE_GC types have tp_clear
     pub fn gc_has_clear(&self) -> bool {
-        self.0.gc_prefix().vtable.clear.is_some()
+        self.0.vtable().clear.is_some()
             || self
                 .0
                 .ext_ref()
@@ -2307,7 +2392,7 @@ impl fmt::Debug for PyObject {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // SAFETY: the vtable contains functions that accept payload types that always match up
         // with the payload of the object
-        unsafe { (self.0.gc_prefix().vtable.debug)(self, f) }
+        unsafe { (self.0.vtable().debug)(self, f) }
     }
 }
 
@@ -2715,7 +2800,9 @@ impl<T: PyPayload + crate::object::MaybeTraverse + core::fmt::Debug> PyRef<T> {
             let inner = cached.as_ptr() as *mut PyInner<T>;
             unsafe {
                 core::ptr::write(&mut (*inner).ref_count, RefCount::new());
-                (*inner).gc_prefix().gc_bits.store(0, Ordering::Relaxed);
+                if (*inner).has_gc_prefix() {
+                    (*inner).gc_prefix().gc_bits.store(0, Ordering::Relaxed);
+                }
                 core::ptr::drop_in_place(&mut (*inner).payload);
                 core::ptr::write(&mut (*inner).payload, payload);
             }

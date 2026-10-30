@@ -13,6 +13,9 @@ use super::{Traverse, TraverseFn};
 
 pub(in crate::object) struct PyObjVTable {
     pub(in crate::object) typeid: TypeId,
+    /// Whether instances carry the full `GcPrefix` (false = `SlimPrefix`).
+    /// Both layouts keep `vtable` at the same `ptr - 8` slot.
+    pub(in crate::object) has_gc_prefix: bool,
     /// dealloc: handles __del__, weakref clearing, and memory free.
     pub(in crate::object) dealloc: unsafe fn(*mut PyObject),
     pub(in crate::object) debug: unsafe fn(&PyObject, &mut fmt::Formatter<'_>) -> fmt::Result,
@@ -24,8 +27,18 @@ pub(in crate::object) struct PyObjVTable {
 
 impl PyObjVTable {
     pub(super) const fn of<T: PyObjectPayload>() -> &'static Self {
+        Self::make::<T, true>()
+    }
+
+    /// VTable for instances allocated with a `SlimPrefix` (no GC metadata).
+    pub(super) const fn slim_of<T: PyObjectPayload>() -> &'static Self {
+        Self::make::<T, false>()
+    }
+
+    const fn make<T: PyObjectPayload, const HAS_GC_PREFIX: bool>() -> &'static Self {
         &Self {
             typeid: T::PAYLOAD_TYPE_ID,
+            has_gc_prefix: HAS_GC_PREFIX,
             dealloc: default_dealloc::<T>,
             debug: debug_obj::<T>,
             trace: const {
@@ -71,7 +84,7 @@ unsafe impl Traverse for PyInner<Erased> {
             ext.slots.traverse(tracer_fn);
         }
 
-        if let Some(f) = self.gc_prefix().vtable.trace {
+        if let Some(f) = self.vtable().trace {
             unsafe {
                 let zelf = &*(self as *const Self as *const PyObject);
                 f(zelf, tracer_fn)
