@@ -694,6 +694,20 @@ define_opcodes!(
         LoadFastBorrowLoadFastBorrowBinaryOp {
             var_nums: Arg<oparg::VarNums>,
         } = 213,
+        /// RustPython-only fusion of `LOAD_FAST_BORROW_LOAD_FAST_BORROW` and
+        /// the `COMPARE_OP` immediately following it. Same contract as the
+        /// binary-op fusion above: the operator comes from the retained
+        /// `COMPARE_OP` unit, which this instruction skips at runtime.
+        LoadFastBorrowLoadFastBorrowCompareOp {
+            var_nums: Arg<oparg::VarNums>,
+        } = 214,
+        /// RustPython-only fusion of `LOAD_SMALL_INT` and the `COMPARE_OP`
+        /// immediately following it. Same contract as `LoadSmallIntBinaryOp`:
+        /// the arg byte is the constant and the comparison comes from the
+        /// retained `COMPARE_OP` unit, which this instruction skips at runtime.
+        LoadSmallIntCompareOp {
+            i: Arg<u32>,
+        } = 215,
         InstrumentedEndFor = 234,
         InstrumentedPopIter = 235,
         InstrumentedEndSend = 236,

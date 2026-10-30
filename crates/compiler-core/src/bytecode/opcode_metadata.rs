@@ -347,6 +347,7 @@ impl super::Opcode {
                 | Self::LoadFastBorrow
                 | Self::LoadFastBorrowLoadFastBorrow
                 | Self::LoadFastBorrowLoadFastBorrowBinaryOp
+                | Self::LoadFastBorrowLoadFastBorrowCompareOp
                 | Self::LoadFastCheck
                 | Self::LoadFastLoadFast
                 | Self::LoadFromDictOrDeref
@@ -355,6 +356,7 @@ impl super::Opcode {
                 | Self::LoadName
                 | Self::LoadSmallInt
                 | Self::LoadSmallIntBinaryOp
+                | Self::LoadSmallIntCompareOp
                 | Self::LoadSpecial
                 | Self::LoadSuperAttr
                 | Self::MakeCell
@@ -542,6 +544,7 @@ impl super::Opcode {
                 | Self::LoadFastBorrow
                 | Self::LoadFastBorrowLoadFastBorrow
                 | Self::LoadFastBorrowLoadFastBorrowBinaryOp
+                | Self::LoadFastBorrowLoadFastBorrowCompareOp
                 | Self::LoadFastCheck
                 | Self::LoadFastLoadFast
                 | Self::StoreFast
@@ -703,6 +706,7 @@ impl super::Opcode {
             // Behaves like the pair load statically: the retained BINARY_OP
             // unit that follows supplies the matching -1 stack effect.
             Self::LoadFastBorrowLoadFastBorrowBinaryOp => (2, 0),
+            Self::LoadFastBorrowLoadFastBorrowCompareOp => (2, 0),
             Self::LoadFastCheck => (1, 0),
             Self::LoadFastLoadFast => (2, 0),
             Self::LoadFromDictOrDeref => (1, 1),
@@ -713,6 +717,7 @@ impl super::Opcode {
             // Behaves like LOAD_SMALL_INT statically: the retained BINARY_OP
             // unit that follows supplies the matching -1 stack effect.
             Self::LoadSmallIntBinaryOp => (1, 0),
+            Self::LoadSmallIntCompareOp => (1, 0),
             Self::LoadSpecial => (2, 1),
             Self::LoadSuperAttr => (1 + (oparg & 1), 3),
             Self::MakeCell => (0, 0),

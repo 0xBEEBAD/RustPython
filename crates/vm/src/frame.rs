@@ -4538,33 +4538,71 @@ impl ExecutingFrame<'_> {
 
                 // Fallback: exactly the pair load; the retained BINARY_OP
                 // unit runs normally next.
-                let fastlocals = self.localsplus.fastlocals();
-                // SAFETY: compiler guarantees both VarNums < nlocals.
-                let x1 = unsafe { fastlocals.get_unchecked(idx1.as_usize()) }
-                    .as_ref()
-                    .ok_or_else(|| {
-                        vm.new_unbound_local_error(format!(
-                            "local variable '{}' referenced before assignment",
-                            self.code.varnames[idx1.as_usize()]
-                        ))
-                    })?;
-                let x2 = unsafe { fastlocals.get_unchecked(idx2.as_usize()) }
-                    .as_ref()
-                    .ok_or_else(|| {
-                        vm.new_unbound_local_error(format!(
-                            "local variable '{}' referenced before assignment",
-                            self.code.varnames[idx2.as_usize()]
-                        ))
-                    })?;
-                // Borrowed loads; see LoadFastBorrow for the safety argument.
-                let p1: *const PyObject = x1.as_object();
-                let p2: *const PyObject = x2.as_object();
-                // SAFETY: the local slots keep both objects alive.
-                unsafe {
-                    self.push_borrowed(&*p1);
-                    self.push_borrowed(&*p2);
+                self.push_borrowed_local_pair(idx1.as_usize(), idx2.as_usize(), vm)
+            }
+            Instruction::LoadSmallIntCompareOp { .. } => {
+                // Fused `LOAD_SMALL_INT n; COMPARE_OP op`: the arg byte is the
+                // constant and the comparison comes from the retained
+                // COMPARE_OP unit that follows.
+                let small = u32::from(arg) & 0xff;
+                let cmp_idx = self.lasti() as usize;
+                let cmp_arg = u32::from(self.code.instructions.read_arg(cmp_idx).as_u8());
+                let skipped = 1 + Opcode::CompareOp.cache_entries();
+
+                if !vm.use_tracing.get() && vm.state.monitoring_events.load() == 0 {
+                    let a = self.top_value();
+                    if let Some(a_int) = a.downcast_ref_if_exact::<PyInt>(vm) {
+                        let cmp_op: PyComparisonOp =
+                            bytecode::ComparisonOperator::try_from(cmp_arg)
+                                .unwrap_or(bytecode::ComparisonOperator::Equal)
+                                .into();
+                        let result =
+                            cmp_op.eval_ord(a_int.as_bigint().cmp(&BigInt::from(small)));
+                        self.pop_value();
+                        self.push_value(vm.ctx.new_bool(result).into());
+                        self.update_lasti(|i| *i += skipped as u32);
+                        return Ok(None);
+                    }
                 }
+
+                // Fallback: exactly LOAD_SMALL_INT; the retained COMPARE_OP
+                // unit runs normally next.
+                self.push_value(vm.ctx.new_int(small as i32).into());
                 Ok(None)
+            }
+            Instruction::LoadFastBorrowLoadFastBorrowCompareOp { var_nums } => {
+                // Fused `LOAD_FAST_BORROW_LOAD_FAST_BORROW a b; COMPARE_OP op`.
+                // The operator comes from the retained COMPARE_OP unit.
+                let oparg = var_nums.get(arg);
+                let (idx1, idx2) = oparg.indexes();
+                let cmp_idx = self.lasti() as usize;
+                let cmp_arg = self.code.instructions.read_arg(cmp_idx);
+                let skipped = 1 + Opcode::CompareOp.cache_entries();
+
+                if !vm.use_tracing.get() && vm.state.monitoring_events.load() == 0 {
+                    let result = {
+                        let fastlocals = self.localsplus.fastlocals();
+                        // SAFETY: compiler guarantees both VarNums < nlocals.
+                        unsafe {
+                            match (
+                                fastlocals.get_unchecked(idx1.as_usize()).as_ref(),
+                                fastlocals.get_unchecked(idx2.as_usize()).as_ref(),
+                            ) {
+                                (Some(x1), Some(x2)) => {
+                                    Self::fused_compare(x1, x2, u32::from(cmp_arg.as_u8()), vm)
+                                }
+                                _ => None,
+                            }
+                        }
+                    };
+                    if let Some(value) = result {
+                        self.push_value(value);
+                        self.update_lasti(|i| *i += skipped as u32);
+                        return Ok(None);
+                    }
+                }
+
+                self.push_borrowed_local_pair(idx1.as_usize(), idx2.as_usize(), vm)
             }
             Instruction::LoadDeref { i } => {
                 let idx = i.get(arg).as_usize();
@@ -4666,33 +4704,7 @@ impl ExecutingFrame<'_> {
             Instruction::LoadFastBorrowLoadFastBorrow { var_nums } => {
                 let oparg = var_nums.get(arg);
                 let (idx1, idx2) = oparg.indexes();
-                let fastlocals = self.localsplus.fastlocals();
-                // SAFETY: compiler guarantees both VarNums < nlocals.
-                let x1 = unsafe { fastlocals.get_unchecked(idx1.as_usize()) }
-                    .as_ref()
-                    .ok_or_else(|| {
-                        vm.new_unbound_local_error(format!(
-                            "local variable '{}' referenced before assignment",
-                            self.code.varnames[idx1.as_usize()]
-                        ))
-                    })?;
-                let x2 = unsafe { fastlocals.get_unchecked(idx2.as_usize()) }
-                    .as_ref()
-                    .ok_or_else(|| {
-                        vm.new_unbound_local_error(format!(
-                            "local variable '{}' referenced before assignment",
-                            self.code.varnames[idx2.as_usize()]
-                        ))
-                    })?;
-                // Borrowed loads; see LoadFastBorrow for the safety argument.
-                let p1: *const PyObject = x1.as_object();
-                let p2: *const PyObject = x2.as_object();
-                // SAFETY: the local slots keep both objects alive.
-                unsafe {
-                    self.push_borrowed(&*p1);
-                    self.push_borrowed(&*p2);
-                }
-                Ok(None)
+                self.push_borrowed_local_pair(idx1.as_usize(), idx2.as_usize(), vm)
             }
             Instruction::LoadGlobal { namei: idx } => {
                 let oparg = idx.get(arg);
@@ -10834,6 +10846,74 @@ impl ExecutingFrame<'_> {
     /// Execute a specialized binary op on two int operands.
     /// Fallback to generic binary op if either operand is not an exact int.
     #[inline]
+    /// Push both locals of a fused pair load as borrowed stack refs, raising
+    /// the same unbound-local error as a plain LOAD_FAST on an empty slot.
+    #[inline]
+    fn push_borrowed_local_pair(
+        &mut self,
+        idx1: usize,
+        idx2: usize,
+        vm: &VirtualMachine,
+    ) -> FrameResult {
+        let fastlocals = self.localsplus.fastlocals();
+        // SAFETY: compiler guarantees both VarNums < nlocals.
+        let x1 = unsafe { fastlocals.get_unchecked(idx1) }
+            .as_ref()
+            .ok_or_else(|| {
+                vm.new_unbound_local_error(format!(
+                    "local variable '{}' referenced before assignment",
+                    self.code.varnames[idx1]
+                ))
+            })?;
+        let x2 = unsafe { fastlocals.get_unchecked(idx2) }
+            .as_ref()
+            .ok_or_else(|| {
+                vm.new_unbound_local_error(format!(
+                    "local variable '{}' referenced before assignment",
+                    self.code.varnames[idx2]
+                ))
+            })?;
+        // Borrowed loads; see LoadFastBorrow for the safety argument.
+        let p1: *const PyObject = x1.as_object();
+        let p2: *const PyObject = x2.as_object();
+        // SAFETY: the local slots keep both objects alive.
+        unsafe {
+            self.push_borrowed(&*p1);
+            self.push_borrowed(&*p2);
+        }
+        Ok(None)
+    }
+
+    /// Exact-type comparison for the fused load+compare dispatch. Returns
+    /// `None` when the operands need the generic path, so the caller runs the
+    /// unfused pair load followed by the retained COMPARE_OP unit.
+    #[inline]
+    fn fused_compare(
+        a: &PyObjectRef,
+        b: &PyObjectRef,
+        arg: u32,
+        vm: &VirtualMachine,
+    ) -> Option<PyObjectRef> {
+        let cmp_op: PyComparisonOp = bytecode::ComparisonOperator::try_from(arg)
+            .unwrap_or(bytecode::ComparisonOperator::Equal)
+            .into();
+        if let (Some(x), Some(y)) = (
+            a.downcast_ref_if_exact::<PyInt>(vm),
+            b.downcast_ref_if_exact::<PyInt>(vm),
+        ) {
+            let result = cmp_op.eval_ord(x.as_bigint().cmp(y.as_bigint()));
+            return Some(vm.ctx.new_bool(result).into());
+        }
+        if let (Some(x), Some(y)) = (
+            a.downcast_ref_if_exact::<PyFloat>(vm),
+            b.downcast_ref_if_exact::<PyFloat>(vm),
+        ) && let Some(ord) = x.to_f64().partial_cmp(&y.to_f64())
+        {
+            return Some(vm.ctx.new_bool(cmp_op.eval_ord(ord)).into());
+        }
+        None
+    }
+
     /// Exact-type operand pair for the fused load+binop dispatches. Returns
     /// `None` when the pair needs the generic slot machinery (user `__add__`,
     /// mixed types, unsupported operator), which the caller then runs by

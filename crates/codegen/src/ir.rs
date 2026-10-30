@@ -2071,6 +2071,9 @@ impl Blocks {
                     fold_const_binop(metadata, &mut self[block_idx], i)?;
                     self.fuse_small_int_binary_op(block_idx, i);
                 }
+                AnyInstruction::Real(Instruction::CompareOp { .. }) => {
+                    self.fuse_small_int_into(block_idx, i, Opcode::LoadSmallIntCompareOp);
+                }
                 _ => {}
             }
 
@@ -2090,18 +2093,13 @@ impl Blocks {
     /// to `LOAD_SMALL_INT`. At runtime the fused arm performs the operation
     /// and skips the `BINARY_OP` plus its inline cache entries.
     fn fuse_small_int_binary_op(&mut self, block_idx: BlockIdx, i: usize) {
-        let Some(prev_idx) = i.checked_sub(1) else {
-            return;
-        };
-        let block = &mut self[block_idx];
-        let binop = block.instructions[i];
-        let AnyInstruction::Real(Instruction::BinaryOp { op }) = binop.instr else {
-            return;
-        };
-        let op = op.get(binop.arg);
         // Only the exact-int fast paths pay for the extra dispatch they remove.
+        let block = &self[block_idx];
+        let AnyInstruction::Real(Instruction::BinaryOp { op }) = block.instructions[i].instr else {
+            return;
+        };
         if !matches!(
-            op,
+            op.get(block.instructions[i].arg),
             oparg::BinaryOperator::Add
                 | oparg::BinaryOperator::Subtract
                 | oparg::BinaryOperator::Multiply
@@ -2111,6 +2109,20 @@ impl Blocks {
         ) {
             return;
         }
+        self.fuse_small_int_into(block_idx, i, Opcode::LoadSmallIntBinaryOp);
+    }
+
+    /// Rewrite `LOAD_SMALL_INT n; <unit>` into one fused dispatch, where the
+    /// unit at `i` supplies the operator. The unit keeps its place (and its
+    /// inline caches), so `co_code`, the line table and the exception table
+    /// stay byte-identical to the unfused pair; the fused instruction skips it
+    /// at runtime, and falls back to it for every case the fast path rejects.
+    fn fuse_small_int_into(&mut self, block_idx: BlockIdx, i: usize, fused: Opcode) {
+        let Some(prev_idx) = i.checked_sub(1) else {
+            return;
+        };
+        let block = &mut self[block_idx];
+        let next = block.instructions[i];
         let load = block.instructions[prev_idx];
         let AnyInstruction::Real(Instruction::LoadSmallInt { i: small_arg }) = load.instr else {
             return;
@@ -2121,11 +2133,11 @@ impl Blocks {
         }
         // Keep source locations and exception ranges of the two units
         // interchangeable: the fused instruction executes at the load's
-        // position but performs the binary operation.
-        if load.instruction_lineno() != binop.instruction_lineno() {
+        // position but performs the operation of the unit it swallows.
+        if load.instruction_lineno() != next.instruction_lineno() {
             return;
         }
-        let same_handler = match (load.except_handler, binop.except_handler) {
+        let same_handler = match (load.except_handler, next.except_handler) {
             (None, None) => true,
             (Some(a), Some(b)) => {
                 a.handler_block == b.handler_block && a.preserve_lasti == b.preserve_lasti
@@ -2135,8 +2147,7 @@ impl Blocks {
         if !same_handler {
             return;
         }
-        block.instructions[prev_idx]
-            .instr_set_op1(Opcode::LoadSmallIntBinaryOp.into(), load.arg);
+        block.instructions[prev_idx].instr_set_op1(fused.into(), load.arg);
     }
 
     /// flowgraph.c _PyCfg_ToInstructionSequence
@@ -2427,20 +2438,21 @@ impl Blocks {
                 // immediately following BINARY_OP can fold the binary
                 // operation into the same dispatch: the borrow analysis above
                 // already proved neither load escapes.
-                let next_is_binop = matches!(
-                    block.instructions.get(i + 1).map(|n| n.instr.real()),
-                    Some(Some(Instruction::BinaryOp { .. }))
-                );
+                let next_fuse = match block.instructions.get(i + 1).map(|n| n.instr.real()) {
+                    Some(Some(Instruction::BinaryOp { .. })) => Some(1),
+                    Some(Some(Instruction::CompareOp { .. })) => Some(2),
+                    _ => None,
+                };
                 let info = &mut block.instructions[i];
                 match info.instr.real_opcode() {
                     Some(Opcode::LoadFast) => {
                         info.instr = Opcode::LoadFastBorrow.into();
                     }
                     Some(Opcode::LoadFastLoadFast) => {
-                        info.instr = if next_is_binop {
-                            Opcode::LoadFastBorrowLoadFastBorrowBinaryOp.into()
-                        } else {
-                            Opcode::LoadFastBorrowLoadFastBorrow.into()
+                        info.instr = match next_fuse {
+                            Some(1) => Opcode::LoadFastBorrowLoadFastBorrowBinaryOp.into(),
+                            Some(2) => Opcode::LoadFastBorrowLoadFastBorrowCompareOp.into(),
+                            _ => Opcode::LoadFastBorrowLoadFastBorrow.into(),
                         };
                     }
                     _ => {}
