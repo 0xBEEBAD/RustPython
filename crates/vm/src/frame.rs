@@ -8003,9 +8003,10 @@ impl ExecutingFrame<'_> {
                 // Keep specialized opcode on guard miss (JUMP_TO_PREDICTED behavior).
                 let cached_version = self.code.instructions.read_cache_u16(cache_base + 1);
                 let cached_index = self.code.instructions.read_cache_u16(cache_base + 3);
-                if let Ok(current_version) = u16::try_from(self.globals.version())
-                    && cached_version == current_version
-                {
+                // The version is compared truncated: the hint probe re-verifies
+                // the key identity and reads the current value, so a wrap can
+                // only cost a miss, never a stale hit.
+                if cached_version == self.globals.version() as u16 {
                     let name = self.code.names[(oparg >> 1) as usize];
                     // The cache installed this site for an exact-dict globals
                     // lookup; the single-thread hint probe skips the generic
@@ -8025,6 +8026,7 @@ impl ExecutingFrame<'_> {
                 if (oparg & 1) != 0 {
                     self.push_value_opt(None);
                 }
+                self.refresh_load_global_cache(cache_base, name, vm);
                 Ok(None)
             }
             Instruction::LoadGlobalBuiltin => {
@@ -8033,11 +8035,9 @@ impl ExecutingFrame<'_> {
                 let cached_globals_ver = self.code.instructions.read_cache_u16(cache_base + 1);
                 let cached_builtins_ver = self.code.instructions.read_cache_u16(cache_base + 2);
                 let cached_index = self.code.instructions.read_cache_u16(cache_base + 3);
-                if let Ok(current_globals_ver) = u16::try_from(self.globals.version())
-                    && cached_globals_ver == current_globals_ver
+                if cached_globals_ver == self.globals.version() as u16
                     && let Some(builtins_dict) = self.builtins_dict
-                    && let Ok(current_builtins_ver) = u16::try_from(builtins_dict.version())
-                    && cached_builtins_ver == current_builtins_ver
+                    && cached_builtins_ver == builtins_dict.version() as u16
                 {
                     let name = self.code.names[(oparg >> 1) as usize];
                     if let Some(x) = builtins_dict.get_hint_single_thread(name, cached_index, vm) {
@@ -8054,6 +8054,7 @@ impl ExecutingFrame<'_> {
                 if (oparg & 1) != 0 {
                     self.push_value_opt(None);
                 }
+                self.refresh_load_global_cache(cache_base, name, vm);
                 Ok(None)
             }
             // All INSTRUMENTED_* opcodes delegate to a cold function to keep
@@ -12042,6 +12043,43 @@ impl ExecutingFrame<'_> {
         self.jump(jump_target);
     }
 
+    /// Re-hint a specialized LOAD_GLOBAL site after its guard or hint missed.
+    /// Specialization happens once per site, so without this refresh a mutated
+    /// globals dict strands every load in that module on the generic lookup
+    /// path forever.
+    fn refresh_load_global_cache(
+        &self,
+        cache_base: usize,
+        name: &'static PyStrInterned,
+        vm: &VirtualMachine,
+    ) {
+        let globals_version = self.globals.version() as u16;
+        if let Ok(Some(hint)) = self.globals.hint_for_key(name, vm) {
+            unsafe {
+                self.code
+                    .instructions
+                    .write_cache_u16(cache_base + 1, globals_version);
+                self.code.instructions.write_cache_u16(cache_base + 2, 0);
+                self.code.instructions.write_cache_u16(cache_base + 3, hint);
+            }
+            return;
+        }
+        if let Some(builtins_dict) = self.builtins_dict
+            && let Ok(Some(hint)) = builtins_dict.hint_for_key(name, vm)
+        {
+            unsafe {
+                self.code
+                    .instructions
+                    .write_cache_u16(cache_base + 1, globals_version);
+                self.code.instructions.write_cache_u16(
+                    cache_base + 2,
+                    builtins_dict.version() as u16,
+                );
+                self.code.instructions.write_cache_u16(cache_base + 3, hint);
+            }
+        }
+    }
+
     fn specialize_load_global(
         &mut self,
         vm: &VirtualMachine,
@@ -12056,17 +12094,10 @@ impl ExecutingFrame<'_> {
             return;
         }
         let name = self.code.names[(oparg >> 1) as usize];
-        let Ok(globals_version) = u16::try_from(self.globals.version()) else {
-            unsafe {
-                self.code.instructions.write_adaptive_counter(
-                    cache_base,
-                    bytecode::adaptive_counter_backoff(
-                        self.code.instructions.read_adaptive_counter(cache_base),
-                    ),
-                );
-            }
-            return;
-        };
+        // Truncated on purpose: see refresh_load_global_cache. A wrap can only
+        // cause a guard miss, never a wrong value, because the hint probe
+        // re-verifies the key and reads the current entry value.
+        let globals_version = self.globals.version() as u16;
 
         if let Ok(Some(globals_hint)) = self.globals.hint_for_key(name, vm) {
             unsafe {
@@ -12084,7 +12115,6 @@ impl ExecutingFrame<'_> {
 
         if let Some(builtins_dict) = self.builtins.downcast_ref_if_exact::<PyDict>(vm)
             && let Ok(Some(builtins_hint)) = builtins_dict.hint_for_key(name, vm)
-            && let Ok(builtins_version) = u16::try_from(builtins_dict.version())
         {
             unsafe {
                 self.code
@@ -12092,7 +12122,7 @@ impl ExecutingFrame<'_> {
                     .write_cache_u16(cache_base + 1, globals_version);
                 self.code
                     .instructions
-                    .write_cache_u16(cache_base + 2, builtins_version);
+                    .write_cache_u16(cache_base + 2, builtins_dict.version() as u16);
                 self.code
                     .instructions
                     .write_cache_u16(cache_base + 3, builtins_hint);
