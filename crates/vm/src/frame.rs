@@ -7873,7 +7873,11 @@ impl ExecutingFrame<'_> {
                     && cached_version == current_version
                 {
                     let name = self.code.names[(oparg >> 1) as usize];
-                    if let Some(x) = self.globals.get_item_opt_hint(name, cached_index, vm)? {
+                    // The cache installed this site for an exact-dict globals
+                    // lookup; the single-thread hint probe skips the generic
+                    // option/fallback layers. A miss falls through to the
+                    // generic lookup below.
+                    if let Some(x) = self.globals.get_hint_single_thread(name, cached_index, vm) {
                         self.push_value(x);
                         if (oparg & 1) != 0 {
                             self.push_value_opt(None);
@@ -7897,12 +7901,12 @@ impl ExecutingFrame<'_> {
                 let cached_index = self.code.instructions.read_cache_u16(cache_base + 3);
                 if let Ok(current_globals_ver) = u16::try_from(self.globals.version())
                     && cached_globals_ver == current_globals_ver
-                    && let Some(builtins_dict) = self.builtins.downcast_ref_if_exact::<PyDict>(vm)
+                    && let Some(builtins_dict) = self.builtins_dict
                     && let Ok(current_builtins_ver) = u16::try_from(builtins_dict.version())
                     && cached_builtins_ver == current_builtins_ver
                 {
                     let name = self.code.names[(oparg >> 1) as usize];
-                    if let Some(x) = builtins_dict.get_item_opt_hint(name, cached_index, vm)? {
+                    if let Some(x) = builtins_dict.get_hint_single_thread(name, cached_index, vm) {
                         self.push_value(x);
                         if (oparg & 1) != 0 {
                             self.push_value_opt(None);
