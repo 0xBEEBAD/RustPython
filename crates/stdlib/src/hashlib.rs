@@ -612,7 +612,10 @@ pub(crate) mod _hashlib {
             "blake2s" => Ok(
                 PyHasher::new("blake2s", HashWrapper::new::<Blake2s256>(data)).into_pyobject(vm),
             ),
-            other => Err(vm.new_value_error(format!("Unknown hashing algorithm: {other}"))),
+            other => Err(vm.new_exception_msg(
+                UnsupportedDigestmodError::static_type().to_owned(),
+                format!("unsupported hash algorithm {other}").into(),
+            )),
         }
     }
 
