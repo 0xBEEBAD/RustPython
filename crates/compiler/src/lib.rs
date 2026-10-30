@@ -5167,6 +5167,247 @@ fn find_unclosed_bracket(source: &str) -> Option<(char, usize)> {
     stack.last().copied()
 }
 
+/// Whether `byte` can continue a Python identifier.
+///
+/// Bytes >= 0x80 are conservatively treated as identifier characters so that a
+/// non-ASCII identifier such as `lazyé` is never mistaken for the `lazy`
+/// keyword. This scanner only needs the ASCII keyword boundary to be exact.
+fn is_identifier_continue(byte: Option<u8>) -> bool {
+    matches!(byte, Some(byte) if byte == b'_' || byte.is_ascii_alphanumeric() || byte >= 0x80)
+}
+
+/// Whether `byte` can start a Python identifier.
+fn is_identifier_start(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphabetic() || byte >= 0x80
+}
+
+fn word_at(bytes: &[u8], index: usize, word: &[u8]) -> bool {
+    bytes.get(index..index + word.len()) == Some(word)
+}
+
+/// Whether `word` occurs at `index` and is not merely a prefix of a longer
+/// identifier.
+fn identifier_at(bytes: &[u8], index: usize, word: &[u8]) -> bool {
+    word_at(bytes, index, word) && !is_identifier_continue(bytes.get(index + word.len()).copied())
+}
+
+/// Skip a string literal beginning at the quote at `start`.
+///
+/// Handles single- and triple-quoted strings and their `r`/`b`/`f`/`u`
+/// prefixes (the prefix itself is skipped by the caller as an identifier).
+/// Backslashes, including line continuations, are skipped wholesale, which is
+/// conservative enough for both raw and non-raw literals. Newlines inside
+/// triple-quoted strings are consumed here so they never look like the start
+/// of a statement.
+fn skip_string_literal(bytes: &[u8], start: usize) -> usize {
+    let quote = bytes[start];
+    let triple = bytes.get(start + 1) == Some(&quote) && bytes.get(start + 2) == Some(&quote);
+    let mut index = start + if triple { 3 } else { 1 };
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            byte if byte == quote => {
+                if !triple {
+                    return index + 1;
+                }
+                if bytes.get(index + 1) == Some(&quote) && bytes.get(index + 2) == Some(&quote) {
+                    return index + 3;
+                }
+                index += 1;
+            }
+            b'\n' | b'\r' if !triple => return index,
+            _ => index += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// Look ahead from just after `from` for the `import` keyword on the same
+/// logical line. String literals and comments are ignored; a newline or `;`
+/// at bracket depth zero ends the search. This keeps `lazy from x` (not a
+/// valid lazy-import header) untouched.
+fn from_clause_has_import(bytes: &[u8], mut index: usize) -> bool {
+    let mut bracket_depth = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b' ' | b'\t' | b'\x0c' => index += 1,
+            b'\r' | b'\n' => {
+                if bracket_depth == 0 {
+                    return false;
+                }
+                index += 1;
+            }
+            b'\\' if matches!(bytes.get(index + 1), Some(b'\n' | b'\r')) => {
+                index += 2;
+                if bytes.get(index) == Some(&b'\n') && bytes.get(index - 1) == Some(&b'\r') {
+                    index += 1;
+                }
+            }
+            b'#' => {
+                while index < bytes.len() && !matches!(bytes[index], b'\n' | b'\r') {
+                    index += 1;
+                }
+                if bracket_depth == 0 {
+                    return false;
+                }
+            }
+            b'\'' | b'"' => index = skip_string_literal(bytes, index),
+            b'(' | b'[' | b'{' => {
+                bracket_depth += 1;
+                index += 1;
+            }
+            b')' | b']' | b'}' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                index += 1;
+            }
+            b';' if bracket_depth == 0 => return false,
+            byte => {
+                if is_identifier_start(byte) {
+                    let start = index;
+                    index += 1;
+                    while index < bytes.len() && is_identifier_continue(bytes.get(index).copied()) {
+                        index += 1;
+                    }
+                    if &bytes[start..index] == b"import" {
+                        return true;
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Rewrite PEP 810 `lazy import` / `lazy from ... import ...` statements into
+/// ordinary eager imports.
+///
+/// The ruff parser pinned by this workspace predates PEP 810, so RustPython
+/// cannot parse CPython 3.15 stdlib modules that use `lazy import`. This
+/// pre-processing step replaces the `lazy` keyword with an equal-length no-op
+/// simple-statement prefix (`0;  `), leaving an ordinary eager import behind.
+/// The source keeps exactly the same length, so every other byte offset, line
+/// and column is unchanged and tracebacks still point at the original
+/// location.
+///
+/// Four spaces cannot be used in place of `lazy`: at the start of a logical
+/// line they would turn the import into an indented line (`IndentationError`
+/// at module level, and a deeper block inside a function), so the replacement
+/// must keep a non-whitespace first byte while remaining a valid statement
+/// separator in every context (`module`, `class`, `def`, and after `;`).
+///
+/// This implements source-level acceptance only. A later milestone can replace
+/// the call sites with a version that emits a real deferred-import proxy.
+///
+/// Returns the input untouched (borrowed, without allocating) when there is no
+/// candidate. A `lazy` keyword is only rewritten when it starts a logical line
+/// (after indentation) or follows a `;`, and the next token is `import` or
+/// `from` with `import` on the same logical line. Strings, comments and
+/// identifiers such as `lazy_var` are ignored.
+#[must_use]
+pub fn normalize_lazy_imports(source: &str) -> std::borrow::Cow<'_, str> {
+    if !source.contains("lazy") {
+        return std::borrow::Cow::Borrowed(source);
+    }
+
+    let bytes = source.as_bytes();
+    let mut rewrites = Vec::new();
+    let mut index = 0usize;
+    let mut at_statement_start = true;
+    let mut bracket_depth = 0usize;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b' ' | b'\t' | b'\x0c' => index += 1,
+            b'\n' => {
+                index += 1;
+                if bracket_depth == 0 {
+                    at_statement_start = true;
+                }
+            }
+            b'\r' => {
+                index += 1;
+                if bytes.get(index) == Some(&b'\n') {
+                    index += 1;
+                }
+                if bracket_depth == 0 {
+                    at_statement_start = true;
+                }
+            }
+            b'\\' if matches!(bytes.get(index + 1), Some(b'\n' | b'\r')) => {
+                index += 2;
+                if bytes.get(index) == Some(&b'\n') && bytes.get(index - 1) == Some(&b'\r') {
+                    index += 1;
+                }
+            }
+            b'#' => {
+                while index < bytes.len() && !matches!(bytes[index], b'\n' | b'\r') {
+                    index += 1;
+                }
+            }
+            b'\'' | b'"' => {
+                index = skip_string_literal(bytes, index);
+                at_statement_start = false;
+            }
+            b'(' | b'[' | b'{' => {
+                bracket_depth += 1;
+                at_statement_start = false;
+                index += 1;
+            }
+            b')' | b']' | b'}' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                at_statement_start = false;
+                index += 1;
+            }
+            b';' => {
+                index += 1;
+                if bracket_depth == 0 {
+                    at_statement_start = true;
+                }
+            }
+            _ => {
+                if at_statement_start && identifier_at(bytes, index, b"lazy") {
+                    let mut next = index + b"lazy".len();
+                    while matches!(bytes.get(next), Some(b' ' | b'\t' | b'\x0c')) {
+                        next += 1;
+                    }
+                    let is_import = identifier_at(bytes, next, b"import");
+                    let is_from = identifier_at(bytes, next, b"from")
+                        && from_clause_has_import(bytes, next + b"from".len());
+                    if is_import || is_from {
+                        rewrites.push(index);
+                    }
+                }
+
+                at_statement_start = false;
+                if is_identifier_start(bytes[index]) {
+                    index += 1;
+                    while index < bytes.len() && is_identifier_continue(bytes.get(index).copied()) {
+                        index += 1;
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+        }
+    }
+
+    if rewrites.is_empty() {
+        return std::borrow::Cow::Borrowed(source);
+    }
+
+    let mut normalized = String::with_capacity(source.len());
+    let mut copied = 0;
+    for start in rewrites {
+        normalized.push_str(&source[copied..start]);
+        normalized.push_str("0;  ");
+        copied = start + b"lazy".len();
+    }
+    normalized.push_str(&source[copied..]);
+    std::borrow::Cow::Owned(normalized)
+}
+
 /// Compile a given source code into a bytecode object.
 pub fn compile(
     source: &str,
@@ -5181,7 +5422,8 @@ pub fn compile(
     #[cfg(windows)]
     let source = source.as_str();
 
-    let source_file = SourceFileBuilder::new(source_path, source).finish();
+    let source = normalize_lazy_imports(source);
+    let source_file = SourceFileBuilder::new(source_path, source.as_ref()).finish();
     _compile(source_file, mode, opts)
     // let index = LineIndex::from_source_text(source);
     // let source_code = SourceCode::new(source, &index);
@@ -5335,10 +5577,8 @@ pub fn compile_with_syntax_warning_handler<'a>(
     syntax_warning_handler: &'a mut compile::SyntaxWarningHandler<'a>,
 ) -> Result<CodeObject, CompileError> {
     let source = source.replace("\r\n", "\n");
-    #[cfg(windows)]
-    let source = source.as_str();
-
-    let source_file = SourceFileBuilder::new(source_path, source).finish();
+    let source = normalize_lazy_imports(&source);
+    let source_file = SourceFileBuilder::new(source_path, source.as_ref()).finish();
     _compile_with_syntax_warning_handler(source_file, mode, opts, Some(syntax_warning_handler))
 }
 
@@ -5347,7 +5587,8 @@ pub fn compile_symtable(
     mode: Mode,
     source_path: &str,
 ) -> Result<symboltable::SymbolTable, CompileError> {
-    let source_file = SourceFileBuilder::new(source_path, source).finish();
+    let source = normalize_lazy_imports(source);
+    let source_file = SourceFileBuilder::new(source_path, source.as_ref()).finish();
     _compile_symtable(source_file, mode)
 }
 
@@ -5568,5 +5809,63 @@ print(RegexFlag.NOFLAG & RegexFlag.DEBUG)
 "#;
         let compiled = compile(code, Mode::Exec, "<string>", CompileOpts::default());
         dbg!(compiled.expect("compile error"));
+    }
+
+    #[test]
+    fn normalize_lazy_imports_statement_positions() {
+        assert_eq!(
+            normalize_lazy_imports("lazy import sys\n").as_ref(),
+            "0;   import sys\n"
+        );
+        assert_eq!(
+            normalize_lazy_imports("lazy from os import path\n").as_ref(),
+            "0;   from os import path\n"
+        );
+        assert_eq!(
+            normalize_lazy_imports("  lazy import os as _os\n").as_ref(),
+            "  0;   import os as _os\n"
+        );
+        assert_eq!(
+            normalize_lazy_imports("x = 1; lazy import sys\n").as_ref(),
+            "x = 1; 0;   import sys\n"
+        );
+        assert_eq!(
+            normalize_lazy_imports("if x:\n    lazy import sys\n").as_ref(),
+            "if x:\n    0;   import sys\n"
+        );
+    }
+
+    #[test]
+    fn normalize_lazy_imports_preserves_length_and_offsets() {
+        let source = "# heading\n\nlazy import sys\nraise RuntimeError\n";
+        let normalized = normalize_lazy_imports(source);
+        assert_eq!(normalized.len(), source.len());
+        for (old, new) in source.lines().zip(normalized.lines()) {
+            assert_eq!(old.len(), new.len());
+        }
+        assert!(normalized.contains("\nraise RuntimeError\n"));
+    }
+
+    #[test]
+    fn normalize_lazy_imports_ignores_strings_comments_and_identifiers() {
+        for source in [
+            "lazy = 1\n",
+            "lazy_var = 1\n",
+            "lazy2 = 1\n",
+            "# lazy import sys\n",
+            "x = 'lazy import sys'\n",
+            "x = \"lazy import sys\"\n",
+            "x = '''\nlazy import sys\n'''\n",
+            "x = r\"\"\"\nlazy from os import path\n\"\"\"\n",
+            "f(1,\n  lazy)\n",
+        ] {
+            assert_eq!(normalize_lazy_imports(source).as_ref(), source);
+        }
+    }
+
+    #[test]
+    fn normalize_lazy_imports_requires_import_after_from() {
+        let source = "lazy from os\n";
+        assert_eq!(normalize_lazy_imports(source).as_ref(), source);
     }
 }
