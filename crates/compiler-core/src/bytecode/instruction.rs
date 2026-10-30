@@ -685,6 +685,15 @@ define_opcodes!(
         LoadSmallIntBinaryOp {
             i: Arg<u32>,
         } = 212,
+        /// RustPython-only fusion of `LOAD_FAST_BORROW_LOAD_FAST_BORROW` and
+        /// the `BINARY_OP` immediately following it.
+        ///
+        /// The arg is the packed local-index pair exactly as for the pair
+        /// load; the operator is read from the retained `BINARY_OP` unit,
+        /// which this instruction skips at runtime.
+        LoadFastBorrowLoadFastBorrowBinaryOp {
+            var_nums: Arg<oparg::VarNums>,
+        } = 213,
         InstrumentedEndFor = 234,
         InstrumentedPopIter = 235,
         InstrumentedEndSend = 236,

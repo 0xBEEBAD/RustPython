@@ -346,6 +346,7 @@ impl super::Opcode {
                 | Self::LoadFastAndClear
                 | Self::LoadFastBorrow
                 | Self::LoadFastBorrowLoadFastBorrow
+                | Self::LoadFastBorrowLoadFastBorrowBinaryOp
                 | Self::LoadFastCheck
                 | Self::LoadFastLoadFast
                 | Self::LoadFromDictOrDeref
@@ -540,6 +541,7 @@ impl super::Opcode {
                 | Self::LoadFastAndClear
                 | Self::LoadFastBorrow
                 | Self::LoadFastBorrowLoadFastBorrow
+                | Self::LoadFastBorrowLoadFastBorrowBinaryOp
                 | Self::LoadFastCheck
                 | Self::LoadFastLoadFast
                 | Self::StoreFast
@@ -698,6 +700,9 @@ impl super::Opcode {
             Self::LoadFastAndClear => (1, 0),
             Self::LoadFastBorrow => (1, 0),
             Self::LoadFastBorrowLoadFastBorrow => (2, 0),
+            // Behaves like the pair load statically: the retained BINARY_OP
+            // unit that follows supplies the matching -1 stack effect.
+            Self::LoadFastBorrowLoadFastBorrowBinaryOp => (2, 0),
             Self::LoadFastCheck => (1, 0),
             Self::LoadFastLoadFast => (2, 0),
             Self::LoadFromDictOrDeref => (1, 1),

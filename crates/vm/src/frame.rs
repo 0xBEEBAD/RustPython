@@ -4495,6 +4495,98 @@ impl ExecutingFrame<'_> {
                 self.push_value(vm.ctx.new_int(small as i32).into());
                 Ok(None)
             }
+            Instruction::LoadFastBorrowLoadFastBorrowBinaryOp { var_nums } => {
+                // Fused `LOAD_FAST_BORROW_LOAD_FAST_BORROW a b; BINARY_OP op`.
+                // The arg is the packed local-index pair and the operator is
+                // read from the retained BINARY_OP unit that follows.
+                let oparg = var_nums.get(arg);
+                let (idx1, idx2) = oparg.indexes();
+                let binop_idx = self.lasti() as usize;
+                let op = bytecode::BinaryOperator::try_from(
+                    self.code.instructions.read_arg(binop_idx).as_u8(),
+                )
+                .unwrap_or(bytecode::BinaryOperator::Add);
+                let skipped = 1 + Opcode::BinaryOp.cache_entries();
+
+                if !vm.use_tracing.get() && vm.state.monitoring_events.load() == 0 {
+                    // Both operands must be present and exact ints; anything
+                    // else (unbound local, subclass, non-int) uses the
+                    // unfused fallback so semantics stay byte-identical.
+                    let result = {
+                        let fastlocals = self.localsplus.fastlocals();
+                        // SAFETY: compiler guarantees both VarNums < nlocals.
+                        unsafe {
+                            match (
+                                fastlocals.get_unchecked(idx1.as_usize()).as_ref(),
+                                fastlocals.get_unchecked(idx2.as_usize()).as_ref(),
+                            ) {
+                                (Some(x1), Some(x2)) => match (
+                                    x1.downcast_ref_if_exact::<PyInt>(vm),
+                                    x2.downcast_ref_if_exact::<PyInt>(vm),
+                                ) {
+                                    (Some(a), Some(b)) => {
+                                        let (a, b) = (a.as_bigint(), b.as_bigint());
+                                        use bytecode::BinaryOperator as Op;
+                                        match op {
+                                            Op::Add | Op::InplaceAdd => {
+                                                Some(Self::int_add(a, b, vm))
+                                            }
+                                            Op::Subtract | Op::InplaceSubtract => {
+                                                Some(Self::int_sub(a, b, vm))
+                                            }
+                                            Op::Multiply | Op::InplaceMultiply => {
+                                                Some(Self::int_mul(a, b, vm))
+                                            }
+                                            _ => None,
+                                        }
+                                    }
+                                    _ => None,
+                                },
+                                _ => None,
+                            }
+                        }
+                    };
+                    if let Some(result) = result {
+                        if let Err(result) =
+                            self.store_result_to_next_local(result, skipped, vm)
+                        {
+                            self.push_value(result);
+                            self.update_lasti(|i| *i += skipped as u32);
+                        }
+                        return Ok(None);
+                    }
+                }
+
+                // Fallback: exactly the pair load; the retained BINARY_OP
+                // unit runs normally next.
+                let fastlocals = self.localsplus.fastlocals();
+                // SAFETY: compiler guarantees both VarNums < nlocals.
+                let x1 = unsafe { fastlocals.get_unchecked(idx1.as_usize()) }
+                    .as_ref()
+                    .ok_or_else(|| {
+                        vm.new_unbound_local_error(format!(
+                            "local variable '{}' referenced before assignment",
+                            self.code.varnames[idx1.as_usize()]
+                        ))
+                    })?;
+                let x2 = unsafe { fastlocals.get_unchecked(idx2.as_usize()) }
+                    .as_ref()
+                    .ok_or_else(|| {
+                        vm.new_unbound_local_error(format!(
+                            "local variable '{}' referenced before assignment",
+                            self.code.varnames[idx2.as_usize()]
+                        ))
+                    })?;
+                // Borrowed loads; see LoadFastBorrow for the safety argument.
+                let p1: *const PyObject = x1.as_object();
+                let p2: *const PyObject = x2.as_object();
+                // SAFETY: the local slots keep both objects alive.
+                unsafe {
+                    self.push_borrowed(&*p1);
+                    self.push_borrowed(&*p2);
+                }
+                Ok(None)
+            }
             Instruction::LoadDeref { i } => {
                 let idx = i.get(arg).as_usize();
                 let x = self

@@ -2419,18 +2419,29 @@ impl Blocks {
             let iused = block.instruction_used;
             let mut i = 0;
             while i < iused {
-                let info = &mut block.instructions[i];
                 if instr_flags[i] != 0 {
                     i += 1;
                     continue;
                 }
-
+                // A local pair whose values are both consumed by the
+                // immediately following BINARY_OP can fold the binary
+                // operation into the same dispatch: the borrow analysis above
+                // already proved neither load escapes.
+                let next_is_binop = matches!(
+                    block.instructions.get(i + 1).map(|n| n.instr.real()),
+                    Some(Some(Instruction::BinaryOp { .. }))
+                );
+                let info = &mut block.instructions[i];
                 match info.instr.real_opcode() {
                     Some(Opcode::LoadFast) => {
                         info.instr = Opcode::LoadFastBorrow.into();
                     }
                     Some(Opcode::LoadFastLoadFast) => {
-                        info.instr = Opcode::LoadFastBorrowLoadFastBorrow.into();
+                        info.instr = if next_is_binop {
+                            Opcode::LoadFastBorrowLoadFastBorrowBinaryOp.into()
+                        } else {
+                            Opcode::LoadFastBorrowLoadFastBorrow.into()
+                        };
                     }
                     _ => {}
                 }
