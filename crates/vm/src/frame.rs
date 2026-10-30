@@ -1621,8 +1621,12 @@ impl FrameObject {
         for slot in fastlocals.iter_mut() {
             *slot = None;
         }
-        self.iframe().cold().f_locals_hidden_overlay.lock().take();
-        self.iframe().cold().f_extra_locals.lock().take();
+        // FrameColdData is heap-allocated on first use; most frames never
+        // create it, so do not force it into existence just to clear it.
+        if let Some(cold) = self.iframe().cold_opt() {
+            cold.f_locals_hidden_overlay.lock().take();
+            cold.f_extra_locals.lock().take();
+        }
     }
 
     /// Store a borrowed back-reference to the owning generator/coroutine.
@@ -5468,7 +5472,9 @@ impl ExecutingFrame<'_> {
 
                 if type_version != 0
                     && owner.class().tp_version_tag.load(Acquire) == type_version
-                    && owner.dict().is_none()
+                    && owner
+                        .instance_dict()
+                        .is_none_or(|d| d.with_read(|opt| opt.is_none()))
                     && let Some(func) = self.try_read_cached_descriptor(cache_base, type_version)
                 {
                     let owner = self.pop_value();
@@ -6055,8 +6061,8 @@ impl ExecutingFrame<'_> {
                         if let Some(i) = resolve(len)
                             && let Some(value) = (unsafe { list.get_raw(i) })
                             {
-                                self.pop_value();
-                                self.pop_value();
+                                self.pop_stackref();
+                                self.pop_stackref();
                                 self.push_value(value);
                                 return Ok(None);
                             }
@@ -6067,8 +6073,8 @@ impl ExecutingFrame<'_> {
                             {
                                 let value = vec.do_get(i);
                                 drop(vec);
-                                self.pop_value();
-                                self.pop_value();
+                                self.pop_stackref();
+                                self.pop_stackref();
                                 self.push_value(value);
                                 return Ok(None);
                             }
@@ -6114,8 +6120,8 @@ impl ExecutingFrame<'_> {
                     if let Some(res) = dict.get_item_single_thread(b, vm) {
                         match res {
                             Ok(Some(value)) => {
-                                self.pop_value();
-                                self.pop_value();
+                                self.pop_stackref();
+                                self.pop_stackref();
                                 self.push_value(value);
                                 return Ok(None);
                             }
@@ -9814,13 +9820,31 @@ impl ExecutingFrame<'_> {
         attr_name: &'static PyStrInterned,
         vm: &VirtualMachine,
     ) -> PyResult<Option<PyObjectRef>> {
-        let Some(dict) = self.top_value().dict() else {
+        let owner = self.top_value();
+        let Some(instance_dict) = owner.instance_dict() else {
             return Ok(None);
         };
+        // Fast path without cloning the instance dict reference: a fresh
+        // lazy-dict instance has no dict at all, and an unchanged keys-version
+        // stamp means the name was already verified absent. Both happen under
+        // the read guard and run no Python code.
         let stamp = self.code.instructions.read_cache_ptr(cache_base + 3);
-        if stamp != 0 && stamp == dict.keys_version() as usize {
+        let mut absent = false;
+        instance_dict.with_read(|dict| {
+            let Some(dict) = dict else {
+                absent = true;
+                return;
+            };
+            if stamp != 0 && stamp == dict.keys_version() as usize {
+                absent = true;
+            }
+        });
+        if absent {
             return Ok(None);
         }
+        let Some(dict) = owner.dict() else {
+            return Ok(None);
+        };
         // Take the stamp before probing so it attests the probed key set.
         let stamp = dict.assign_keys_version(vm);
         if let Some(value) = dict.get_item_opt(attr_name, vm)? {

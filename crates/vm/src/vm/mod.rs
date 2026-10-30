@@ -905,6 +905,7 @@ impl VirtualMachine {
             .get_attr(self.ctx.intern_str("rfind"));
         let exc = &self.ctx.exceptions;
         self.callable_cache.plain_exceptions = [
+            exc.exception_type,
             exc.value_error,
             exc.type_error,
             exc.runtime_error,
@@ -2948,9 +2949,15 @@ impl VirtualMachine {
 
     /// Push a new exc_info slot (for generator/coroutine resume).
     pub(crate) fn push_exception(&self, exc: Option<PyBaseExceptionRef>) {
+        // The published topmost exception only changes when a Some slot is
+        // pushed (topmost scans past Nones), so a plain resume must not pay
+        // the cross-thread publish.
+        let publish = exc.is_some();
         self.exceptions.borrow_mut().stack.push(exc);
         #[cfg(feature = "threading")]
-        thread::update_thread_exception(self.topmost_exception());
+        if publish {
+            thread::update_thread_exception(self.topmost_exception());
+        }
     }
 
     /// Pop the topmost exc_info slot (generator/coroutine yield/return).
@@ -2962,7 +2969,9 @@ impl VirtualMachine {
             .pop()
             .expect("pop_exception() without nested exc stack");
         #[cfg(feature = "threading")]
-        thread::update_thread_exception(self.topmost_exception());
+        if exc.is_some() {
+            thread::update_thread_exception(self.topmost_exception());
+        }
         exc
     }
 

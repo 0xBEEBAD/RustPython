@@ -1237,6 +1237,14 @@ impl InstanceDict {
         self.d.read().clone()
     }
 
+    /// Run `f` with a borrowed view of the currently-set dict, under the read
+    /// lock, without cloning the `PyDictRef`. Use only for work that cannot
+    /// run Python code (a nested read lock may deadlock against a waiter).
+    #[inline]
+    pub(crate) fn with_read<R>(&self, f: impl FnOnce(Option<&PyDictRef>) -> R) -> R {
+        f(self.d.read().as_ref())
+    }
+
     #[inline]
     pub(crate) fn set(&self, d: Option<PyDictRef>) {
         self.replace(d);
