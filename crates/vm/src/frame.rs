@@ -6249,7 +6249,7 @@ impl ExecutingFrame<'_> {
                     let callable = self.pop_value();
                     let func = callable.downcast_ref_if_exact::<PyFunction>(vm).unwrap();
                     let result = func.invoke_exact_args_slots(args, vm)?;
-                    self.push_value(result);
+                    self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
                     Ok(None)
                 } else {
                     self.execute_call_vectorcall(nargs, vm)
@@ -6318,7 +6318,7 @@ impl ExecutingFrame<'_> {
                         self.pop_value(); // callable (bound method)
                         args[0] = Some(bound_self);
                         let result = func.invoke_exact_args_slots(args, vm)?;
-                        self.push_value(result);
+                        self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
                         return Ok(None);
                     }
                 }
@@ -6483,7 +6483,7 @@ impl ExecutingFrame<'_> {
                         }
                         let result =
                             callable.vectorcall(args_vec, effective_nargs as usize, None, vm)?;
-                        self.push_value(result);
+                        self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
                         return Ok(None);
                     }
                 }
@@ -6549,7 +6549,7 @@ impl ExecutingFrame<'_> {
                         }
                         let result =
                             callable.vectorcall(args_vec, effective_nargs as usize, None, vm)?;
-                        self.push_value(result);
+                        self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
                         return Ok(None);
                     }
                 }
@@ -6631,7 +6631,7 @@ impl ExecutingFrame<'_> {
                             None,
                             vm,
                         )?;
-                        self.push_value(result);
+                        self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
                         return Ok(None);
                     }
                 }
@@ -6773,7 +6773,7 @@ impl ExecutingFrame<'_> {
                             1,
                             || func(vm, args),
                         )?;
-                        self.push_value(result);
+                        self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
                         return Ok(None);
                     }
                 }
@@ -6892,7 +6892,7 @@ impl ExecutingFrame<'_> {
                             1,
                             || func(vm, args),
                         )?;
-                        self.push_value(result);
+                        self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
                         return Ok(None);
                     }
                 }
@@ -6950,7 +6950,7 @@ impl ExecutingFrame<'_> {
                         1,
                         || func(vm, args),
                     )?;
-                    self.push_value(result);
+                    self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
                     return Ok(None);
                 }
                 self.execute_call_vectorcall(nargs, vm)
@@ -6983,7 +6983,7 @@ impl ExecutingFrame<'_> {
                         None,
                         vm,
                     )?;
-                    self.push_value(result);
+                    self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
                     return Ok(None);
                 }
                 self.execute_call_vectorcall(nargs, vm)
@@ -7054,7 +7054,7 @@ impl ExecutingFrame<'_> {
                     let _null = self.pop_value_opt(); // self_or_null (None)
                     let _callable = self.pop_value(); // callable (type)
                     let result = self.specialization_run_init(new_obj, &init_func, args, vm)?;
-                    self.push_value(result);
+                    self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
                     return Ok(None);
                 }
                 self.execute_call_vectorcall(nargs, vm)
@@ -7112,7 +7112,7 @@ impl ExecutingFrame<'_> {
                         1,
                         || func(vm, args),
                     )?;
-                    self.push_value(result);
+                    self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
                     return Ok(None);
                 }
                 self.execute_call_vectorcall(nargs, vm)
@@ -7150,7 +7150,7 @@ impl ExecutingFrame<'_> {
                         }
                         let result =
                             callable.vectorcall(args_vec, effective_nargs as usize, None, vm)?;
-                        self.push_value(result);
+                        self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
                         return Ok(None);
                     }
                 }
@@ -9339,7 +9339,7 @@ impl ExecutingFrame<'_> {
         if let Some(value) =
             Self::bin_op_exact_fast(a_ref.as_object(), b_ref.as_object(), op, vm)
         {
-            self.push_value(value);
+            self.push_value_or_discard(value, Instruction::from(Opcode::BinaryOp).cache_entries(), vm);
             return Ok(None);
         }
 
@@ -9380,7 +9380,7 @@ impl ExecutingFrame<'_> {
             bytecode::BinaryOperator::Subscr => a_ref.get_item(b_ref.as_object(), vm),
         }?;
 
-        self.push_value(value);
+        self.push_value_or_discard(value, Instruction::from(Opcode::BinaryOp).cache_entries(), vm);
         Ok(None)
     }
 
@@ -12164,6 +12164,33 @@ impl ExecutingFrame<'_> {
     #[allow(dead_code)]
     unsafe fn push_borrowed(&mut self, obj: &PyObject) {
         self.push_stackref_opt(Some(unsafe { PyStackRef::new_borrowed(obj) }));
+    }
+
+    /// Push `value` unless the next instruction is `POP_TOP`, in which case
+    /// drop it and skip that instruction. A discarded call/op result costs one
+    /// dispatch and one stack round-trip otherwise. `POP_TOP` cannot raise and
+    /// a raising operation never reaches it, so the fold is transparent; only
+    /// tracing and monitoring need the split path. `cache_units` is the number
+    /// of inline cache slots of the instruction currently executing.
+    #[inline]
+    fn push_value_or_discard(
+        &mut self,
+        value: PyObjectRef,
+        cache_units: usize,
+        vm: &VirtualMachine,
+    ) {
+        if !vm.use_tracing.get() && vm.state.monitoring_events.load() == 0 {
+            let next_idx = self.lasti() as usize + cache_units;
+            if let Some(unit) = self.code.instructions.get(next_idx)
+                && matches!(unit.op, Instruction::PopTop)
+            {
+                drop(value);
+                self.lasti
+                    .store((next_idx + 1) as u32, atomic::Ordering::Relaxed);
+                return;
+            }
+        }
+        self.push_value(value);
     }
 
     /// If the instruction after the current one is a plain `STORE_FAST`, store
