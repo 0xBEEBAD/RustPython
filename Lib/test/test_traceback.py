@@ -37,7 +37,7 @@ test_code.co_positions = lambda _: iter([(6, 6, 0, 0)])
 test_frame = namedtuple('frame', ['f_code', 'f_globals', 'f_locals'])
 test_tb = namedtuple('tb', ['tb_frame', 'tb_lineno', 'tb_next', 'tb_lasti'])
 
-color_overrides = {"reset": "z", "filename": "fn", "error_highlight": "E"}
+color_overrides = {"reset": "z", "filename": "fn", "error_highlight": "E", "note": "n"}
 colors = {
     color_overrides.get(k, k[0].lower()): v
     for k, v in _colorize.default_theme.traceback.items()
@@ -4888,7 +4888,7 @@ class TestColorizedTraceback(unittest.TestCase):
                 e, capture_locals=True
             )
         actual = "".join(exc.format(colorize=True))
-        def expected(t, m, fn, l, f, E, e, z):
+        def expected(t, m, fn, l, f, E, e, z, n):
             return "".join(
                 [
                     f'  File {fn}"<string>"{z}, line {l}1{z}\n',
@@ -4915,7 +4915,7 @@ class TestColorizedTraceback(unittest.TestCase):
             actual = tbstderr.getvalue().splitlines()
 
         lno_foo = foo.__code__.co_firstlineno
-        def expected(t, m, fn, l, f, E, e, z):
+        def expected(t, m, fn, l, f, E, e, z, n):
             return [
                 'Traceback (most recent call last):',
                 f'  File {fn}"{__file__}"{z}, '
@@ -4948,7 +4948,7 @@ class TestColorizedTraceback(unittest.TestCase):
 
         lno_foo = foo.__code__.co_firstlineno
         actual = "".join(exc.format(colorize=True)).splitlines()
-        def expected(t, m, fn, l, f, E, e, z):
+        def expected(t, m, fn, l, f, E, e, z, n):
             return [
                 f"  + Exception Group Traceback (most recent call last):",
                 f'  |   File {fn}"{__file__}"{z}, line {l}{lno_foo+9}{z}, in {f}test_colorized_traceback_from_exception_group{z}',
