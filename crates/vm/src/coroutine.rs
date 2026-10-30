@@ -269,7 +269,7 @@ impl Coro {
         let result = self.run_claimed(&claim, vm, |f| f.gen_throw(vm, exc_type, exc_val, exc_tb));
         self.maybe_close(&result, &claim);
         drop(claim);
-        Ok(result?.into_iter_return(vm))
+        self.finalize_send_result(result, jen, vm)
     }
 
     pub fn close(&self, jen: &PyObject, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
