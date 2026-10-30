@@ -166,7 +166,7 @@ fn generate_numeric_type() {
         .join("unicode")
         .join("latest");
 
-    // Build a map from the 16.0.0 DerivedNumericType.txt so that the
+    // Build a map from the 17.0.0 DerivedNumericType.txt so that the
     // 3.2.0 DIFF table compares against the modern UCD version.
     let mut modern_map = Vec::<(u32, u32, String)>::new();
     write_derived(
@@ -184,7 +184,7 @@ fn generate_numeric_type() {
         },
     );
 
-    // The 3.2.0 DIFF table: entries whose type differs from the 16.0.0 type.
+    // The 3.2.0 DIFF table: entries whose type differs from the 17.0.0 type.
     write_derived(
         &ucd32,
         "DerivedNumericType-3.2.0.txt",
@@ -384,7 +384,7 @@ fn generate_unicode_latest() {
         .join("unicode")
         .join("latest");
 
-    // Unicode 16.0.0 (the version bundled by CPython 3.14) tables generated
+    // Unicode 17.0.0 (the version bundled by CPython 3.15) tables generated
     // from the UCD derived files, so the modern view matches CPython's
     // unicodedata exactly. Unassigned / default-valued code points are left
     // out and resolved by the lookup fallbacks in data.rs.
@@ -438,6 +438,43 @@ fn generate_unicode_latest() {
             write!(writer, "];").unwrap();
         },
     );
+
+    // Default Bidi_Class values for unassigned code points, from the
+    // `# @missing:` lines of DerivedBidiClass.txt. CPython 3.15 returns these
+    // defaults; earlier versions returned an empty string.
+    {
+        let reader = BufReader::new(File::open(base.join("DerivedBidiClass.txt")).unwrap());
+        let mut defaults = Vec::new();
+        for line in reader.lines().map(Result::unwrap) {
+            let Some(rest) = line.trim().strip_prefix("# @missing: ") else {
+                continue;
+            };
+            let (range, value) = rest.split_once(';').unwrap();
+            let (start, end) = match range.split_once("..") {
+                Some((left, right)) => (
+                    u32::from_str_radix(left, 16).unwrap(),
+                    u32::from_str_radix(right, 16).unwrap(),
+                ),
+                None => {
+                    let cp = u32::from_str_radix(range, 16).unwrap();
+                    (cp, cp)
+                }
+            };
+            let short = match value.trim() {
+                "Left_To_Right" => "L",
+                "Right_To_Left" => "R",
+                "Arabic_Letter" => "AL",
+                "European_Terminator" => "ET",
+                other => panic!("unexpected Bidi_Class default: {other}"),
+            };
+            defaults.push((start, end, short));
+        }
+        writeln!(
+            writer,
+            "pub(crate) static BIDI_CLASS_DEFAULT: &[(u32, u32, &str)] = &{defaults:?};"
+        )
+        .unwrap();
+    }
 
     write_derived(
         &base,
@@ -627,7 +664,7 @@ fn generate_unicode_latest() {
     }
     writeln!(writer, "];").unwrap();
 
-    // Casing-related derived properties from DerivedCoreProperties.txt (UCD 16.0.0).
+    // Casing-related derived properties from DerivedCoreProperties.txt (UCD 17.0.0).
     for (prop, static_name) in [
         ("Lowercase", "LOWERCASE_PROP"),
         ("Uppercase", "UPPERCASE_PROP"),
@@ -672,7 +709,7 @@ fn generate_unicode_latest() {
 /// Those are listed explicitly below.
 fn write_cased_prop<W: Write>(base: &Path, writer: &mut W) {
     /// Code points whose unconditional *full* case mapping is non-identity while
-    /// their simple mapping is the identity, as `start..=end` pairs in UCD 16.0.0.
+    /// their simple mapping is the identity, as `start..=end` pairs in UCD 17.0.0.
     const FULL_CASE_ONLY: &[(u32, u32)] = &[
         (0x00DF, 0x00DF), // LATIN SMALL LETTER SHARP S
         (0x0149, 0x0149), // LATIN SMALL LETTER N PRECEDED BY APOSTROPHE

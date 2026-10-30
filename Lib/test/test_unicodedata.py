@@ -95,6 +95,10 @@ class UnicodeFunctionsTest(unittest.TestCase):
                         '46ca89d9fe34881d0be3a4a4b29f5aa8c019640c')
 
     def test_function_checksum(self):
+        if not self.old:
+            self.skipTest(
+                "TODO: RUSTPYTHON; needs a CPython 3.15 checksum reference (UCD 17)"
+            )
         db = self.db
         data = []
         h = hashlib.sha1()
@@ -305,7 +309,8 @@ class UnicodeFunctionsTest(unittest.TestCase):
         self.assertRaises(TypeError, self.db.category, 'xx')
 
     def test_bidirectional(self):
-        self.assertEqual(self.db.bidirectional('\uFFFE'), '')
+        # UCD 17 (CPython 3.15) assigns BN to U+FFFE; the 3.2.0 database has no entry.
+        self.assertEqual(self.db.bidirectional('\uFFFE'), '' if self.old else 'BN')
         self.assertEqual(self.db.bidirectional(' '), 'WS')
         self.assertEqual(self.db.bidirectional('A'), 'L')
         self.assertEqual(self.db.bidirectional('\U00020000'), 'L')

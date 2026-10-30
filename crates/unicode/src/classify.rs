@@ -4,7 +4,7 @@
 //! WTF-8 text apply these per code point, treating lone surrogates as failing
 //! every predicate.
 //!
-//! Uses the 16.0.0 UCD tables (matching CPython 3.14) instead of ICU lookups
+//! Uses the 17.0.0 UCD tables (matching CPython 3.15) instead of ICU lookups
 //! so that `str.isalpha()` etc. are consistent with `unicodedata`.
 
 use icu_properties::props::{BidiClass, GeneralCategory, GeneralCategoryGroup, NumericType};

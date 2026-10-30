@@ -30,58 +30,31 @@ use crate::data::{lookup_range, category_of, CASED_PROP, CASE_IGNORABLE_PROP, LO
 
 // Code-point mappings
 
-/// Characters that are unassigned in UCD 16.0.0 but have a case mapping
-/// in 17.0.0. For these characters, `str.lower()`/`str.upper()`/`str.title()`
-/// must return the character itself (identity) to match CPython 3.14.
+/// Lowercase with Rust std's full case mapping (UCD 17.0.0).
+///
+/// String-level `to_lowercase` applies the context-dependent final-sigma rule
+/// (U+03A3 -> U+03C2 at word end), matching CPython. Rust 1.98's tables already
+/// include the characters and case pairs added in UCD 17.0.0, so no
+/// version-specific overrides are needed.
 #[must_use]
-pub fn is_ucd_16_only_case(c: char) -> bool {
-    matches!(c as u32, 0xA7CE | 0xA7CF | 0xA7D2 | 0xA7D3 | 0xA7D4 | 0xA7D5)
+pub fn to_lowercase(s: &str) -> String {
+    s.to_lowercase()
 }
 
-/// UCD 16.0.0-aware lowercase: uses Rust std's full case mapping for all
-/// characters except the few that were added in 17.0.0 and have no 16.0.0
-/// mapping.
+/// Uppercase with Rust std's full case mapping (UCD 17.0.0).
 #[must_use]
-pub fn to_lowercase_16(s: &str) -> String {
-    let has_ucd16_only = s.chars().any(is_ucd_16_only_case);
-    if !has_ucd16_only {
-        // String-level to_lowercase applies the context-dependent final-sigma
-        // rule (U+03A3 -> U+03C2 at word end), matching CPython.
-        return s.to_lowercase();
-    }
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if is_ucd_16_only_case(c) {
-            out.push(c);
-        } else {
-            out.extend(c.to_lowercase());
-        }
-    }
-    out
+pub fn to_uppercase(s: &str) -> String {
+    s.to_uppercase()
 }
 
-/// UCD 16.0.0-aware uppercase.
+/// Lowercase WTF-8 text, passing lone surrogates through.
 #[must_use]
-pub fn to_uppercase_16(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if is_ucd_16_only_case(c) {
-            out.push(c);
-        } else {
-            out.extend(c.to_uppercase());
-        }
-    }
-    out
-}
-
-/// UCD 16.0.0-aware lowercase for WTF-8, passing lone surrogates through.
-#[must_use]
-pub fn to_lowercase_wtf8_16(text: &Wtf8) -> Wtf8Buf {
+pub fn to_lowercase_wtf8(text: &Wtf8) -> Wtf8Buf {
     let mut out = Vec::with_capacity(text.len());
     for chunk in text.chunks() {
         match chunk {
             Wtf8Chunk::Utf8(s) => {
-                out.extend(to_lowercase_16(s).as_bytes());
+                out.extend(to_lowercase(s).as_bytes());
             }
             Wtf8Chunk::Surrogate(c) => {
                 let mut buf = Wtf8Buf::new();
@@ -90,18 +63,18 @@ pub fn to_lowercase_wtf8_16(text: &Wtf8) -> Wtf8Buf {
             }
         }
     }
-    // SAFETY: to_lowercase_16 produces valid UTF-8, surrogates are valid WTF-8.
+    // SAFETY: to_lowercase produces valid UTF-8, surrogates are valid WTF-8.
     unsafe { Wtf8Buf::from_bytes_unchecked(out) }
 }
 
-/// UCD 16.0.0-aware uppercase for WTF-8, passing lone surrogates through.
+/// Uppercase WTF-8 text, passing lone surrogates through.
 #[must_use]
-pub fn to_uppercase_wtf8_16(text: &Wtf8) -> Wtf8Buf {
+pub fn to_uppercase_wtf8(text: &Wtf8) -> Wtf8Buf {
     let mut out = Vec::with_capacity(text.len());
     for chunk in text.chunks() {
         match chunk {
             Wtf8Chunk::Utf8(s) => {
-                out.extend(to_uppercase_16(s).as_bytes());
+                out.extend(to_uppercase(s).as_bytes());
             }
             Wtf8Chunk::Surrogate(c) => {
                 let mut buf = Wtf8Buf::new();
@@ -331,14 +304,6 @@ fn titlecase_segment(s: &str, out: &mut FmtWriter<'_>) {
     // and skips anything else, dropping the titlecase mapping of cased marks
     // such as U+0345 (`ͅ`, general category Mn) -> U+0399 (`Ι`). `None`
     // titlecases the code point as given.
-    // UCD 16.0.0 correction: characters unassigned in 16.0.0 have no titlecase
-    // mapping (identity).
-    if let Some(ch) = s.chars().next()
-        && is_ucd_16_only_case(ch)
-    {
-        push_char(ch, out);
-        return;
-    }
     let mut options = TitlecaseOptions::default();
     options.leading_adjustment = Some(LeadingAdjustment::None);
     TitlecaseMapper::new()

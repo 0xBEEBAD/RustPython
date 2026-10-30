@@ -1,7 +1,7 @@
 //! Access to the Unicode character database (`unicodedata`).
 //!
-//! Owns the generated Unicode 3.2.0 / 16.0.0 tables. The latest tables are
-//! generated from the UCD 16.0.0 files (the version bundled by CPython 3.14)
+//! Owns the generated Unicode 3.2.0 / 17.0.0 tables. The latest tables are
+//! generated from the UCD 17.0.0 files (the version bundled by CPython 3.15)
 //! so that the `unicodedata` module matches CPython's behavior exactly.
 
 // spell-checker:ignore codep decomp DECOMP unidata
@@ -108,10 +108,22 @@ pub(crate) fn lookup_range(table: &[(u32, u32)], ch: char) -> bool {
         .is_ok()
 }
 
-/// The General Category of `c` according to the 16.0.0 tables.
+/// The General Category of `c` according to the 17.0.0 tables.
 #[must_use]
 pub(crate) fn category_of(c: char) -> GeneralCategory {
     lookup_property(GENERAL_CATEGORY_LATEST, c).unwrap_or(GeneralCategory::Unassigned)
+}
+
+/// Default Bidi_Class of an unassigned code point, from the UCD `@missing`
+/// lines; the last matching range wins. CPython 3.15 reports these defaults
+/// instead of an empty string.
+fn default_bidi_class(c: char) -> &'static str {
+    let code = c as u32;
+    BIDI_CLASS_DEFAULT
+        .iter()
+        .rev()
+        .find(|&&(start, end, _)| code >= start && code <= end)
+        .map_or(BidiClass::LeftToRight.short_name(), |&(_, _, name)| name)
 }
 
 fn lookup_numeric_val(ch: char, modern: bool) -> Option<f64> {
@@ -138,11 +150,11 @@ fn lookup_numeric_val(ch: char, modern: bool) -> Option<f64> {
 }
 
 /// The version string of the latest Unicode database bundled with the
-/// standard library (`unicodedata.unidata_version`): UCD 16.0.0, the version
-/// CPython 3.14 ships.
+/// standard library (`unicodedata.unidata_version`): UCD 17.0.0, the version
+/// CPython 3.15 ships.
 #[must_use]
 pub fn unicode_version() -> String {
-    "16.0.0".to_owned()
+    "17.0.0".to_owned()
 }
 
 /// The Unicode name of `ch` (`unicodedata.name`), if any.
@@ -220,16 +232,16 @@ fn derived_name_range(code: u32) -> Option<u8> {
         (0x3400, 0x4DBF, 1),
         (0x4E00, 0x9FFF, 1),
         (0xAC00, 0xD7A3, 0),
-        (0x17000, 0x187F7, 2),
-        (0x18D00, 0x18D08, 2),
+        (0x17000, 0x187FF, 2),
+        (0x18D00, 0x18D1E, 2),
         (0x20000, 0x2A6DF, 1),
-        (0x2A700, 0x2B739, 1),
+        (0x2A700, 0x2B73F, 1),
         (0x2B740, 0x2B81D, 1),
-        (0x2B820, 0x2CEA1, 1),
+        (0x2B820, 0x2CEAD, 1),
         (0x2CEB0, 0x2EBE0, 1),
         (0x2EBF0, 0x2EE5D, 1),
         (0x30000, 0x3134A, 1),
-        (0x31350, 0x323AF, 1),
+        (0x31350, 0x33479, 1),
     ];
     for (first, last, id) in RANGES {
         if code < first {
@@ -301,7 +313,7 @@ fn lookup_name_by_name(table: &[(&str, u32)], name: &str) -> Option<u32> {
 
 /// A view over the Unicode character database at a fixed version.
 ///
-/// `modern` selects the latest bundled UCD (16.0.0); otherwise the Unicode
+/// `modern` selects the latest bundled UCD (17.0.0); otherwise the Unicode
 /// 3.2.0 tables used by `unicodedata.ucd_3_2_0` are consulted.
 #[derive(Debug, Clone, Copy)]
 pub struct Ucd {
@@ -334,18 +346,19 @@ impl Ucd {
         let Some(c) = c.to_char() else {
             return BidiClass::LeftToRight.short_name();
         };
-        // CPython leaves the bidi class empty for unassigned code points.
-        if self.category(CodePoint::from(c)) == "Cn" {
+        // CPython leaves the bidi class empty for unassigned code points in the
+        // legacy view; from 3.15 the modern view uses the UCD defaults.
+        if !self.modern && self.category(CodePoint::from(c)) == "Cn" {
             return "";
         }
         if self.modern {
-            lookup_property(BIDI_CLASS_LATEST, c)
-        } else {
-            cold_path();
-            lookup_property(BIDI_CLASS, c)
+            return lookup_property(BIDI_CLASS_LATEST, c)
+                .map_or_else(|| default_bidi_class(c), |bc| bc.short_name());
         }
-        .unwrap_or(BidiClass::LeftToRight)
-        .short_name()
+        cold_path();
+        lookup_property(BIDI_CLASS, c)
+            .unwrap_or(BidiClass::LeftToRight)
+            .short_name()
     }
 
     #[must_use]
@@ -485,12 +498,11 @@ impl Ucd {
             return match id {
                 0 => Some(hangul_syllable_name(code)),
                 1 => Some(format!("CJK UNIFIED IDEOGRAPH-{code:04X}")),
-                // Tangut ideograph names are a CPython 3.15 feature; 3.14's
-                // name() leaves them unnamed.
+                2 => Some(format!("TANGUT IDEOGRAPH-{code:04X}")),
                 _ => None,
             };
         }
-        // The 3.2.0 and 16.0.0 names are identical for assigned characters,
+        // The 3.2.0 and 17.0.0 names are identical for assigned characters,
         // so both views share the modern name table.
         lookup_name(NAMES, code)
     }
@@ -620,8 +632,9 @@ mod tests {
         assert!((third - 1.0 / 3.0).abs() < 1e-6, "got {third}");
         // Exact rational values, matching CPython's double arithmetic.
         assert_eq!(ucd.numeric(cp('⅐')), Some(1.0 / 7.0));
-        // Unassigned code points have an empty bidi class.
-        assert_eq!(ucd.bidirectional(CodePoint::from_u32(0x0378).unwrap()), "");
+        // Unassigned code points use the UCD default Bidi_Class from 17.0.0.
+        assert_eq!(ucd.bidirectional(CodePoint::from_u32(0x0378).unwrap()), "L");
+        assert_eq!(ucd.bidirectional(CodePoint::from_u32(0x0590).unwrap()), "R");
         // Hangul syllables decompose to the full LVT.
         assert_eq!(ucd.decomposition(cp('가')), "1100 1161");
         assert_eq!(ucd.decomposition(cp('각')), "1100 1161 11A8");
@@ -636,17 +649,30 @@ mod tests {
             Some("HANGUL SYLLABLE GAG")
         );
         assert_eq!(lookup_character("hangul syllable ga"), Some('가'));
-        // Tangut names are not supported by name() in CPython 3.14.
-        assert_eq!(character_name('\u{17000}'), None);
+        // Tangut names are algorithmic from 17.0.0 (CPython 3.15).
+        assert_eq!(
+            character_name('\u{17000}').as_deref(),
+            Some("TANGUT IDEOGRAPH-17000")
+        );
         assert_eq!(lookup_character("TANGUT IDEOGRAPH-17000"), Some('\u{17000}'));
-        // Unassigned in 16.0.0 (assigned in 17.0.0).
-        assert_eq!(character_name('\u{1ACF}'), None);
-        assert_eq!(ucd.category(cp('\u{1ACF}')), "Cn");
+        // Tangut and CJK ranges extended in 17.0.0.
+        assert_eq!(
+            character_name('\u{187F8}').as_deref(),
+            Some("TANGUT IDEOGRAPH-187F8")
+        );
+        assert_eq!(
+            character_name('\u{33479}').as_deref(),
+            Some("CJK UNIFIED IDEOGRAPH-33479")
+        );
+        assert_eq!(lookup_character("CJK UNIFIED IDEOGRAPH-323B0"), Some('\u{323B0}'));
+        // Newly assigned in 17.0.0.
+        assert_eq!(character_name('\u{1ACF}').as_deref(), Some("COMBINING DOUBLE CARON"));
+        assert_eq!(ucd.category(cp('\u{1ACF}')), "Mn");
         // Decomposition format: space-separated, no leading space; compat
         // entries carry the "<tag>".
         assert_eq!(ucd.decomposition(cp('À')), "0041 0300");
         assert_eq!(ucd.decomposition(cp('¼')), "<fraction> 0031 2044 0034");
-        // East Asian width for unassigned chars defaults to Neutral in 16.0.0.
+        // East Asian width for unassigned chars defaults to Neutral in 17.0.0.
         assert_eq!(ucd.east_asian_width(CodePoint::from_u32(0x0378).unwrap()), "N");
     }
 
