@@ -23,6 +23,11 @@ def requires_builtin_hmac():
     return unittest.skipIf(_hmac is None, "requires _hmac")
 
 
+def requires_openssl_hashlib():
+    # 3.15 name for requires_hashlib (the OpenSSL-backed module).
+    return unittest.skipIf(_hashlib is None, "requires _hashlib")
+
+
 def _missing_hash(digestname, implementation=None, *, exc=None):
     parts = ["missing", implementation, f"hash algorithm: {digestname!r}"]
     msg = " ".join(filter(None, parts))
