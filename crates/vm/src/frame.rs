@@ -5186,31 +5186,39 @@ impl ExecutingFrame<'_> {
                 let exc_type = self.pop_value();
                 let exc = self.top_value();
 
-                // Validate that exc_type inherits from BaseException. CPython uses
-                // a plain subtype check here (no __subclasscheck__ hook).
+                // CPython's PyExceptionClass_Check: the target has to be a class
+                // that really inherits BaseException. Neither __subclasscheck__
+                // nor __instancecheck__ gets a vote, so the MRO walk answers both
+                // the validation and the match, and anything that is not a class
+                // (an instance, a union) is rejected here.
                 let base = vm.ctx.exceptions.base_exception_type.as_object();
-                let inherits_base = |obj: &PyObjectRef| -> PyResult<bool> {
-                    if let Some(typ) = obj.downcast_ref::<PyType>() {
-                        Ok(typ.fast_issubclass(base))
-                    } else {
-                        obj.is_subclass(base, vm)
-                    }
+                fn catch_class<'a>(obj: &'a PyObject, base: &PyObject) -> Option<&'a Py<PyType>> {
+                    obj.downcast_ref::<PyType>()
+                        .filter(|typ| typ.fast_issubclass(base))
+                }
+                let invalid = || {
+                    vm.new_type_error(
+                        "catching classes that do not inherit from BaseException is not allowed",
+                    )
                 };
-                if let Some(tuple_of_exceptions) = exc_type.downcast_ref::<PyTuple>() {
+                let exc_class = exc.class();
+                let result = if let Some(tuple_of_exceptions) =
+                    exc_type.downcast_ref::<PyTuple>()
+                {
+                    // CPython validates every element before it matches any.
                     for exception in tuple_of_exceptions {
-                        if !inherits_base(exception)? {
-                            return Err(vm.new_type_error(
-                                "catching classes that do not inherit from BaseException is not allowed",
-                            ));
+                        if catch_class(exception, base).is_none() {
+                            return Err(invalid());
                         }
                     }
-                } else if !inherits_base(&exc_type)? {
-                    return Err(vm.new_type_error(
-                        "catching classes that do not inherit from BaseException is not allowed",
-                    ));
-                }
-
-                let result = exc.is_instance(&exc_type, vm)?;
+                    tuple_of_exceptions
+                        .iter()
+                        .filter_map(|typ| catch_class(typ, base))
+                        .any(|typ| exc_class.fast_issubclass(typ))
+                } else {
+                    let typ = catch_class(&exc_type, base).ok_or_else(invalid)?;
+                    exc_class.fast_issubclass(typ)
+                };
                 self.push_value(vm.ctx.new_bool(result).into());
                 Ok(None)
             }
