@@ -8972,7 +8972,13 @@ impl ExecutingFrame<'_> {
         let python_call_fast = if !vm.use_tracing.get() && effective_nargs <= FAST_ARGS {
             self.nth_value((nargs_usize + 1) as u32)
                 .downcast_ref_if_exact::<PyFunction>(vm)
-                .is_some_and(|func| func.has_simple_exact_args(effective_nargs as u32))
+                .is_some_and(|func| {
+                    // Generators stay out of this path: they must produce a
+                    // generator object, not run the body, and that routing is a
+                    // separate hypothesis from the frameless call itself.
+                    !func.is_generator_like()
+                        && func.has_simple_exact_args(effective_nargs as u32)
+                })
         } else {
             false
         };
@@ -9015,11 +9021,22 @@ impl ExecutingFrame<'_> {
                 .downcast_ref_if_exact::<PyFunction>(vm)
                 .expect("callable slot unchanged since the fast-path test");
             // invoke_exact_args_slots runs the callee without materialising a
-            // frame object (and routes generator/coroutine code to the
-            // generator-building variant), which is what the specialized call
-            // arms already do; preparing a FrameObject here cost an object
-            // plus globals/builtins clones and two refcount pairs per call.
-            let result = func.invoke_exact_args_slots(&mut buf[..effective_nargs], vm);
+            // frame object, which is what the specialized call arms already do;
+            // preparing a FrameObject here cost an object plus globals/builtins
+            // clones and two refcount pairs per call. Ablating it keeps both
+            // routes in one binary and one profile, so a measured difference is
+            // the route and not the code layout.
+            let result = if crate::perf_debug::ablated(crate::perf_debug::FRAMELESS) {
+                let frame = func.prepare_exact_args_frame(
+                    buf[..effective_nargs].iter_mut().map(|o| o.take().unwrap()),
+                    vm,
+                );
+                let result = vm.run_frame(frame.clone());
+                crate::frame::release_datastack_frame(&frame, vm);
+                result
+            } else {
+                func.invoke_exact_args_slots(&mut buf[..effective_nargs], vm)
+            };
             self.push_value(result?);
             return Ok(None);
         }

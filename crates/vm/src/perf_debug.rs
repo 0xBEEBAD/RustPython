@@ -20,6 +20,11 @@ use std::sync::OnceLock;
 
 pub(crate) const NEXT_FAST: u16 = 1;
 pub(crate) const QUICKENED: u16 = 2;
+/// Ablating this routes the exact-args Python call fast path back through a
+/// materialized FrameObject (`prepare_exact_args_frame` + `run_frame`) instead
+/// of the frameless `invoke_exact_args_slots`, so the two can be compared
+/// inside one binary and one profile.
+pub(crate) const FRAMELESS: u16 = 4;
 pub(crate) const ZERO_ARG: u16 = 8;
 pub(crate) const CLASS_CALL: u16 = 16;
 pub(crate) const STR_METHOD: u16 = 32;
@@ -51,6 +56,7 @@ pub(crate) fn ablated(bit: u16) -> bool {
                     "lazydict" => LAZY_DICT,
                     "excctor" => EXC_CTOR,
                     "genclose" => GEN_CLOSE,
+                    "frameless" => FRAMELESS,
                     _ => 0,
                 };
             }
