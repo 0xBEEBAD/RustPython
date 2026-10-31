@@ -8972,19 +8972,7 @@ impl ExecutingFrame<'_> {
         let python_call_fast = if !vm.use_tracing.get() && effective_nargs <= FAST_ARGS {
             self.nth_value((nargs_usize + 1) as u32)
                 .downcast_ref_if_exact::<PyFunction>(vm)
-                .is_some_and(|func| {
-                    let code: &Py<PyCode> = &func.code;
-                    code.flags.contains(bytecode::CodeFlags::OPTIMIZED)
-                        && !code.flags.intersects(
-                            bytecode::CodeFlags::VARARGS
-                                | bytecode::CodeFlags::VARKEYWORDS
-                                | bytecode::CodeFlags::GENERATOR
-                                | bytecode::CodeFlags::COROUTINE
-                                | bytecode::CodeFlags::ASYNC_GENERATOR,
-                        )
-                        && code.kwonlyarg_count == 0
-                        && effective_nargs == code.arg_count as usize
-                })
+                .is_some_and(|func| func.has_simple_exact_args(effective_nargs as u32))
         } else {
             false
         };
@@ -9026,12 +9014,12 @@ impl ExecutingFrame<'_> {
             let func = callable_obj
                 .downcast_ref_if_exact::<PyFunction>(vm)
                 .expect("callable slot unchanged since the fast-path test");
-            let frame = func.prepare_exact_args_frame(
-                buf[..effective_nargs].iter_mut().map(|o| o.take().unwrap()),
-                vm,
-            );
-            let result = vm.run_frame(frame.clone());
-            crate::frame::release_datastack_frame(&frame, vm);
+            // invoke_exact_args_slots runs the callee without materialising a
+            // frame object (and routes generator/coroutine code to the
+            // generator-building variant), which is what the specialized call
+            // arms already do; preparing a FrameObject here cost an object
+            // plus globals/builtins clones and two refcount pairs per call.
+            let result = func.invoke_exact_args_slots(&mut buf[..effective_nargs], vm);
             self.push_value(result?);
             return Ok(None);
         }
