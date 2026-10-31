@@ -5,14 +5,34 @@ mod _opcode {
     use crate::vm::{
         AsObject, PyObjectRef, PyResult, VirtualMachine,
         builtins::{PyInt, PyIntRef},
-        bytecode::{AnyOpcode, oparg},
+        bytecode::{AnyOpcode, Opcode, oparg},
     };
 
+    /// The four fused opcodes (212-215) are RustPython-only and compiler
+    /// emitted, so they deliberately have no entry in `dis.opmap`. CPython's
+    /// `_opcode` rejects every code that `dis` has no name for, therefore the
+    /// Python-facing view of the opcode table has to reject them too; the
+    /// interpreter keeps using them internally.
+    const fn is_python_visible(instr: AnyOpcode) -> bool {
+        !matches!(
+            instr,
+            AnyOpcode::Real(
+                Opcode::LoadSmallIntBinaryOp
+                    | Opcode::LoadSmallIntCompareOp
+                    | Opcode::LoadFastBorrowLoadFastBorrowBinaryOp
+                    | Opcode::LoadFastBorrowLoadFastBorrowCompareOp
+            )
+        )
+    }
+
     fn try_from_i32(raw: i32) -> Result<AnyOpcode, ()> {
-        u16::try_from(raw)
-            .map_err(|_| ())?
-            .try_into()
-            .map_err(|_| ())
+        let value = u16::try_from(raw).map_err(|_| ())?;
+        let instr = AnyOpcode::try_from(value).map_err(|_| ())?;
+        if is_python_visible(instr) {
+            Ok(instr)
+        } else {
+            Err(())
+        }
     }
 
     // prepare specialization
@@ -64,14 +84,16 @@ mod _opcode {
             None => None,
         };
 
+        // One validity notion for the whole module: try_from_i32 already rejects
+        // the RustPython-only fused opcodes, so stack_effect cannot disagree
+        // with is_valid/has_arg about which codes exist.
         let instr = args
             .opcode
-            .try_to_primitive::<u16>(vm)
-            .and_then(|v| {
-                AnyOpcode::try_from(v)
-                    .map_err(|_| vm.new_exception_empty(vm.ctx.exceptions.value_error.to_owned()))
-            })
-            .map_err(|_| vm.new_value_error("invalid opcode or oparg"))?;
+            .try_to_primitive::<i32>(vm)
+            .map_err(|_| vm.new_value_error("invalid opcode or oparg"))
+            .and_then(|raw| {
+                try_from_i32(raw).map_err(|_| vm.new_value_error("invalid opcode or oparg"))
+            })?;
 
         // Raise ValueError if specialized.
         if instr.real().is_some_and(|op| op.deopt().is_some()) {
