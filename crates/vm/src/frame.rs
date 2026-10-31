@@ -6369,7 +6369,10 @@ impl ExecutingFrame<'_> {
                     if self.specialization_call_recursion_guard(vm) {
                         return self.execute_call_vectorcall(nargs, vm);
                     }
-                    if self.tailcall_enabled && !func.is_generator_like() {
+                    if self.tailcall_enabled
+                        && !func.is_generator_like()
+                        && !crate::perf_debug::ablated(crate::perf_debug::NO_TAILCALL)
+                    {
                         self.tailcall_prepare_frame(nargs, self_or_null_is_some, vm);
                         return Ok(Some(ExecutionResult::TailCall));
                     }
@@ -6438,7 +6441,10 @@ impl ExecutingFrame<'_> {
                         let func = bound_function
                             .downcast_ref_if_exact::<PyFunction>(vm)
                             .unwrap();
-                        if self.tailcall_enabled && !func.is_generator_like() {
+                        if self.tailcall_enabled
+                            && !func.is_generator_like()
+                            && !crate::perf_debug::ablated(crate::perf_debug::NO_TAILCALL)
+                        {
                             self.tailcall_prepare_bound_method_frame(
                                 nargs,
                                 bound_function,

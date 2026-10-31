@@ -15,6 +15,8 @@
 //! * `lazydict` - create instance dicts eagerly again
 //! * `excctor` - disable the direct builtin-exception constructor
 //! * `genclose` - resume the frame with GeneratorExit on close()
+//! * `notail` - call the callee recursively instead of via the TailCall trampoline
+//! * `stubcall` - return None from an exact-args Python call without running the callee
 
 use std::sync::OnceLock;
 
@@ -25,6 +27,16 @@ pub(crate) const QUICKENED: u16 = 2;
 /// of the frameless `invoke_exact_args_slots`, so the two can be compared
 /// inside one binary and one profile.
 pub(crate) const FRAMELESS: u16 = 4;
+/// Ablating this keeps `CallPyExactArgs` on the recursive route (invoke the
+/// callee from the caller's instruction loop) instead of handing the prepared
+/// callee frame to the TailCall trampoline, so the two can be compared inside
+/// one binary and one profile.
+pub(crate) const NO_TAILCALL: u16 = 16384;
+/// Measurement only: return `None` from the exact-args invoke without running
+/// the callee, which isolates CALL dispatch and argument moves from everything
+/// the callee costs. Breaks program semantics, so it is reachable only through
+/// an explicit `LUNA_ABLATE=stubcall`.
+pub(crate) const STUB_CALL: u16 = 512;
 pub(crate) const ZERO_ARG: u16 = 8;
 pub(crate) const CLASS_CALL: u16 = 16;
 pub(crate) const STR_METHOD: u16 = 32;
@@ -57,6 +69,8 @@ pub(crate) fn ablated(bit: u16) -> bool {
                     "excctor" => EXC_CTOR,
                     "genclose" => GEN_CLOSE,
                     "frameless" => FRAMELESS,
+                    "notail" => NO_TAILCALL,
+                    "stubcall" => STUB_CALL,
                     _ => 0,
                 };
             }

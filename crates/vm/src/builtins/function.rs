@@ -896,6 +896,16 @@ impl Py<PyFunction> {
     ) -> PyResult {
         debug_assert_eq!(args.len(), self.code.arg_count as usize);
 
+        // Measurement-only ablation: consume the arguments and return without
+        // touching the callee, so CALL dispatch and argument-move cost can be
+        // read off a single binary and single profile.
+        if crate::perf_debug::ablated(crate::perf_debug::STUB_CALL) {
+            for slot in args.iter_mut() {
+                slot.take();
+            }
+            return Ok(vm.ctx.none());
+        }
+
         // Generator/coroutine code objects are SIMPLE_FUNCTION in call
         // specialization classification, but their call path must still
         // produce generator/coroutine objects. When the call shape is a plain
