@@ -2243,15 +2243,21 @@ impl Constructor for PyType {
                 tuple.try_into_typed(vm)?
             };
 
-            // Check if base has itemsize > 0 - can't add arbitrary slots to variable-size types
-            // Types like int, bytes, tuple have itemsize > 0 and don't allow custom slots
-            // But types like weakref.ref have itemsize = 0 and DO allow slots
+            // 3.15 (gh-41779) refuses arbitrary slots only for a variable-size
+            // base that is not a tuple: int, bytes and type keep itemsize > 0,
+            // while a tuple subtype's items sit at the end of the object and the
+            // slots simply follow them. RustPython needs no offset arithmetic
+            // for that, because instance slots live in the ObjExt prefix in
+            // front of PyInner rather than after the items.
             let has_custom_slots = slots
                 .iter()
                 .any(|s| !matches!(s.as_bytes(), b"__dict__" | b"__weakref__"));
-            if has_custom_slots && base.slots.itemsize > 0 {
+            if has_custom_slots
+                && base.slots.itemsize > 0
+                && !base.fast_issubclass(vm.ctx.types.tuple_type)
+            {
                 return Err(vm.new_type_error(format!(
-                    "nonempty __slots__ not supported for subtype of '{}'",
+                    "arbitrary __slots__ not supported for subtype of '{}'",
                     base.name()
                 )));
             }

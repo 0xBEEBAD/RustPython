@@ -318,8 +318,8 @@ class _ResultBase:
 
 
 class _DefragResultBase(_ResultBase, namedtuple('_DefragResultBase', 'url fragment')):
-    # TODO: RUSTPYTHON: gh-41779 missing - RustPython rejects nonempty
-    # __slots__ on a tuple subtype, so `_keep_empty` lives in the __dict__.
+    __slots__ = ('_keep_empty',)
+
     def geturl(self):
         if self.fragment or (self.fragment is not None and
                              getattr(self, '_keep_empty', _MISSING_AS_NONE_DEFAULT)):
@@ -329,13 +329,15 @@ class _DefragResultBase(_ResultBase, namedtuple('_DefragResultBase', 'url fragme
 
 class _SplitResultBase(_ResultBase, namedtuple(
         '_SplitResultBase', 'scheme netloc path query fragment')):
-    # TODO: RUSTPYTHON: gh-41779 missing, see _DefragResultBase.
+    __slots__ = ('_keep_empty',)
+
     def geturl(self):
         return urlunsplit(self)
 
 class _ParseResultBase(_ResultBase, namedtuple(
         '_ParseResultBase', 'scheme netloc path params query fragment')):
-    # TODO: RUSTPYTHON: gh-41779 missing, see _DefragResultBase.
+    __slots__ = ('_keep_empty',)
+
     def geturl(self):
         return urlunparse(self)
 
