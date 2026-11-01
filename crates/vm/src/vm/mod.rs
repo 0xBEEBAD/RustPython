@@ -2410,10 +2410,34 @@ impl VirtualMachine {
         state: IframeEntryState,
         value: Option<crate::PyObjectRef>,
     ) {
-        // A tracer that raises while leaving the frame is not propagated: this
-        // frame is already unwinding and the exit path has no error channel.
-        let _ = self.trace_event(crate::protocol::TraceEvent::Return, value);
+        if self.exit_event_wanted(unsafe { &*state.iframe_ptr }) {
+            // A tracer that raises while leaving the frame is not propagated:
+            // this frame is already unwinding and the exit path has no error
+            // channel.
+            let _ = self.trace_event(crate::protocol::TraceEvent::Return, value);
+        }
         self.exit_iframe(state);
+    }
+
+    /// Whether leaving `iframe` owes its observer a `'return'` event.
+    ///
+    /// A profile function sees every frame exit, but a trace function only sees
+    /// the frames it was installed on: a frame that started before
+    /// `sys.settrace()` and never had `f_trace` set reports nothing at exit on
+    /// either interpreter, and firing for it anyway breaks `bdb`'s event
+    /// sequences. The global suppression counter is handled inside
+    /// `trace_event`.
+    #[inline]
+    fn exit_event_wanted(&self, iframe: &crate::frame::InterpreterFrame) -> bool {
+        if !self.use_tracing.get() {
+            return false;
+        }
+        if !self.is_none(&self.profile_func.borrow()) {
+            return true;
+        }
+        iframe
+            .cold_opt()
+            .is_some_and(|c| c.trace.lock().is_some())
     }
 
     pub(crate) fn exit_iframe(&self, state: IframeEntryState) {
@@ -2620,16 +2644,10 @@ impl VirtualMachine {
 
         let result = f(frame);
 
-        // Fire 'return' event if frame is being traced or profiled.
-        // PY_UNWIND fires PyTrace_RETURN with arg=None — so we fire for
-        // both Ok and Err, matching `call_trace_protected` behavior.
-        if self.use_tracing.get()
-            && (!self.is_none(&self.profile_func.borrow())
-                || frame
-                    .iframe()
-                    .cold_opt()
-                    .is_some_and(|c| c.trace.lock().is_some()))
-        {
+        // Fire 'return' event if the frame is being traced or profiled.
+        // PY_UNWIND fires PyTrace_RETURN too, so we fire for both Ok and Err,
+        // matching `call_trace_protected` behavior.
+        if self.exit_event_wanted(frame.iframe()) {
             let ret_arg = match &result {
                 Ok(crate::frame::ExecutionResult::Return(value))
                 | Ok(crate::frame::ExecutionResult::Yield(value)) => Some(value.clone()),
