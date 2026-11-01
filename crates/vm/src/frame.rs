@@ -826,6 +826,12 @@ pub(crate) struct FrameColdData {
     pub f_extra_locals: PyMutex<Option<PyDictRef>>,
     pub escaped: atomic::AtomicBool,
     pub retained_back: PyMutex<Option<FrameObjectRef>>,
+    /// Chain snapshots handed out *for this frame* by `materialize_slow_chain`
+    /// while it was still executing. Each one is a detached copy that cannot
+    /// link further up on its own, so `exit_iframe` completes them as this
+    /// frame unwinds; that is what keeps an escaped deep frame walkable after
+    /// all of its ancestors have returned.
+    pub retained_snapshots: PyMutex<Vec<FrameObjectRef>>,
     pub pending_stack_pops: PyAtomic<u32>,
     pub pending_unwind_from_stack: PyAtomic<i64>,
 }
@@ -841,6 +847,7 @@ impl Default for FrameColdData {
             f_extra_locals: PyMutex::new(None),
             escaped: atomic::AtomicBool::new(false),
             retained_back: PyMutex::new(None),
+            retained_snapshots: PyMutex::new(Vec::new()),
             pending_stack_pops: Default::default(),
             pending_unwind_from_stack: Default::default(),
         }
@@ -1259,6 +1266,11 @@ impl InterpreterFrame {
         };
         let frame_ref = frame_obj.into_ref(&vm.ctx);
         FrameObject::init_iframe_ptrs(&frame_ref);
+
+        // Register this snapshot with the frame it was taken of. A detached
+        // copy cannot find its own caller once that caller returns, so the
+        // caller links it as it unwinds (see FrameColdData::retained_snapshots).
+        self.cold().retained_snapshots.lock().push(frame_ref.clone());
 
         frame_ref
     }

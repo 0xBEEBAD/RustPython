@@ -2401,41 +2401,69 @@ impl VirtualMachine {
             save_exc,
         } = state;
 
-        // If this iframe was materialized, capture f_back so that code
-        // holding a reference to the FrameObject can walk the chain after
-        // return.  Read materialized through read_volatile to bypass
-        // LLVM's noalias on the &mut iframe borrow.
+        // Capture f_back so that code holding a reference to this frame can
+        // walk the chain after return. Two things can hold such a reference:
+        // this frame's own materialized FrameObject, and the detached chain
+        // snapshots callees took of it through `materialize_chain` - a snapshot
+        // has no live source to walk up from, so it is completed here. Read
+        // materialized through read_volatile to bypass LLVM's noalias on the
+        // &mut iframe borrow.
         {
             let mat_ptr = unsafe {
                 let field_ptr = core::ptr::addr_of!((*iframe_ptr).materialized);
                 core::ptr::read_volatile(field_ptr as *const usize)
             };
-            if mat_ptr != 0 {
-                let fo = unsafe { &*(mat_ptr as *const crate::Py<crate::frame::FrameObject>) };
-                unsafe {
-                    let live_iframe = &*iframe_ptr;
-                    fo.iframe_mut()
-                        .localsplus
-                        .sync_fastlocals_from(&live_iframe.localsplus);
-                    fo.iframe_mut().prev_line.set(live_iframe.prev_line.get());
-                    #[allow(unused_imports)]
-                    use rustpython_common::atomic::Radium;
-                    fo.iframe_mut().lasti.store(
-                        live_iframe
-                            .lasti
-                            .load(core::sync::atomic::Ordering::Relaxed),
-                        core::sync::atomic::Ordering::Relaxed,
+            let handed_out = unsafe {
+                match (*iframe_ptr).cold_opt() {
+                    Some(cold) => {
+                        let mut guard = cold.retained_snapshots.lock();
+                        if guard.is_empty() {
+                            None
+                        } else {
+                            Some(std::mem::take(&mut *guard))
+                        }
+                    }
+                    None => None,
+                }
+            };
+            if mat_ptr != 0 || handed_out.is_some() {
+                let back_fo =
+                    (!old_chain.is_null()).then(|| unsafe { &*old_chain }.materialize_chain(self));
+                if mat_ptr != 0 {
+                    let fo = unsafe {
+                        &*(mat_ptr as *const crate::Py<crate::frame::FrameObject>)
+                    };
+                    unsafe {
+                        let live_iframe = &*iframe_ptr;
+                        fo.iframe_mut()
+                            .localsplus
+                            .sync_fastlocals_from(&live_iframe.localsplus);
+                        fo.iframe_mut().prev_line.set(live_iframe.prev_line.get());
+                        #[allow(unused_imports)]
+                        use rustpython_common::atomic::Radium;
+                        fo.iframe_mut().lasti.store(
+                            live_iframe
+                                .lasti
+                                .load(core::sync::atomic::Ordering::Relaxed),
+                            core::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
+                    if let Some(back_fo) = &back_fo {
+                        *fo.iframe().cold().retained_back.lock() = Some(back_fo.clone());
+                    }
+                    fo.iframe().owner.store(
+                        crate::frame::FrameOwner::FrameObject as i8,
+                        core::sync::atomic::Ordering::Release,
                     );
                 }
-                if !old_chain.is_null() {
-                    let prev_iframe = unsafe { &*old_chain };
-                    let back_fo = prev_iframe.materialize_chain(self);
-                    *fo.iframe().cold().retained_back.lock() = Some(back_fo);
+                for snapshot in handed_out.unwrap_or_default() {
+                    if let Some(back_fo) = &back_fo {
+                        let mut guard = snapshot.iframe().cold().retained_back.lock();
+                        if guard.is_none() {
+                            *guard = Some(back_fo.clone());
+                        }
+                    }
                 }
-                fo.iframe().owner.store(
-                    crate::frame::FrameOwner::FrameObject as i8,
-                    core::sync::atomic::Ordering::Release,
-                );
             }
         }
 
