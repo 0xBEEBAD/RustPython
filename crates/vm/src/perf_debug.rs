@@ -17,6 +17,8 @@
 //! * `genclose` - resume the frame with GeneratorExit on close()
 //! * `notail` - call the callee recursively instead of via the TailCall trampoline
 //! * `stubcall` - return None from an exact-args Python call without running the callee
+//! * `rangeint` - allocate a fresh int for every `for i in range(n)` step instead
+//!   of folding the step into the loop variable's own object
 
 use std::sync::OnceLock;
 
@@ -47,6 +49,10 @@ pub(crate) const JOIN: u16 = 1024;
 pub(crate) const LAZY_DICT: u16 = 2048;
 pub(crate) const EXC_CTOR: u16 = 4096;
 pub(crate) const GEN_CLOSE: u16 = 8192;
+/// Ablating this makes a `for i in range(n)` loop allocate a fresh int at every
+/// step again, instead of folding the step into the object the previous
+/// iteration handed out, so the two can be compared inside one binary.
+pub(crate) const RANGE_INT: u16 = 32768;
 
 /// True when the named optimization is ablated through `LUNA_ABLATE`.
 pub(crate) fn ablated(bit: u16) -> bool {
@@ -71,6 +77,7 @@ pub(crate) fn ablated(bit: u16) -> bool {
                     "frameless" => FRAMELESS,
                     "notail" => NO_TAILCALL,
                     "stubcall" => STUB_CALL,
+                    "rangeint" => RANGE_INT,
                     _ => 0,
                 };
             }

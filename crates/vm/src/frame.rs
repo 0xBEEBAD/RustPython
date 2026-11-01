@@ -7938,9 +7938,16 @@ impl ExecutingFrame<'_> {
                         range_iter.fast_next()
                     };
                     if let Some(value) = value {
-                        let obj: PyObjectRef = vm.ctx.new_int(value).into();
-                        if let Err(obj) = self.store_result_to_next_local(obj, Instruction::from(Opcode::ForIter).cache_entries(), vm) {
-                            self.push_value(obj);
+                        let cache = Instruction::from(Opcode::ForIter).cache_entries();
+                        // Keep the raw payload pointer instead of the borrow:
+                        // the iterator is pinned on this frame's stack for the
+                        // whole loop, and the store below needs `&mut self`.
+                        let iter_ptr = range_iter as *const Py<PyRangeIterator>;
+                        if !self.reuse_range_loop_int(iter_ptr, value, cache, vm) {
+                            let obj: PyObjectRef = vm.ctx.new_int(value).into();
+                            if let Err(obj) = self.store_result_to_next_local(obj, cache, vm) {
+                                self.push_value(obj);
+                            }
                         }
                     } else {
                         self.for_iter_jump_on_exhausted(target);
@@ -12543,27 +12550,74 @@ impl ExecutingFrame<'_> {
         cache_units: usize,
         vm: &VirtualMachine,
     ) -> Result<(), PyObjectRef> {
-        if vm.use_tracing.get() || vm.state.monitoring_events.load() != 0 {
-            return Err(value);
-        }
-        let next_idx = self.lasti() as usize + cache_units;
-        let Some(unit) = self.code.instructions.get(next_idx) else {
+        let Some((var_num, next_lasti)) = self.fused_store_target(cache_units, vm) else {
             return Err(value);
         };
+        // SAFETY: bytecode compiler guarantees var_num < nlocals.
+        let slot = unsafe { self.localsplus.fastlocals_mut().get_unchecked_mut(var_num) };
+        *slot = Some(value);
+        self.lasti.store(next_lasti as u32, atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// The target of a fused "produce a value, store it in a local" pair: the
+    /// local index and the `lasti` just past the `STORE_FAST`, or None when the
+    /// next instruction is not a plain `STORE_FAST` or something observes
+    /// instruction boundaries. One place decides, so the producer paths cannot
+    /// disagree about when the fusion applies.
+    #[inline]
+    fn fused_store_target(&self, cache_units: usize, vm: &VirtualMachine) -> Option<(usize, usize)> {
+        if vm.use_tracing.get() || vm.state.monitoring_events.load() != 0 {
+            return None;
+        }
+        let next_idx = self.lasti() as usize + cache_units;
+        let unit = self.code.instructions.get(next_idx)?;
         // A plain STORE_FAST always carries its local index in the
         // instruction's own byte (an EXTENDED_ARG would have been a separate
         // instruction in between), and StoreFast is never quickened.
-        if matches!(unit.op, Instruction::StoreFast { .. }) {
-            let idx = usize::from(u8::from(unit.arg));
-            // SAFETY: bytecode compiler guarantees var_num < nlocals.
-            let slot = unsafe { self.localsplus.fastlocals_mut().get_unchecked_mut(idx) };
-            *slot = Some(value);
-            self.lasti
-                .store((next_idx + 1) as u32, atomic::Ordering::Relaxed);
-            Ok(())
-        } else {
-            Err(value)
+        match unit.op {
+            Instruction::StoreFast { .. } => {
+                Some((usize::from(u8::from(unit.arg)), next_idx + 1))
+            }
+            _ => None,
         }
+    }
+
+    /// `FOR_ITER` over a range iterator whose result lands in a local: hand the
+    /// previous iteration's int back with the step folded into it, rather than
+    /// allocating a new one per step. Returns false whenever the object in the
+    /// slot is not safely ours to update, in which case the caller allocates
+    /// and stores as before.
+    #[inline]
+    fn reuse_range_loop_int(
+        &mut self,
+        iter: *const Py<PyRangeIterator>,
+        value: isize,
+        cache_units: usize,
+        vm: &VirtualMachine,
+    ) -> bool {
+        if crate::perf_debug::ablated(crate::perf_debug::RANGE_INT) {
+            return false;
+        }
+        // SAFETY: the iterator is pinned on this frame's operand stack until the
+        // loop exits, which is the same guarantee `fast_next` relies on.
+        let iter = unsafe { &*iter };
+        let Some((step, previous)) = iter.reuse_plan(value) else {
+            return false;
+        };
+        let Some((var_num, next_lasti)) = self.fused_store_target(cache_units, vm) else {
+            return false;
+        };
+        // SAFETY: bytecode compiler guarantees var_num < nlocals.
+        let slot = unsafe { self.localsplus.fastlocals_mut().get_unchecked_mut(var_num) };
+        let Some(obj) = slot.as_ref() else {
+            return false;
+        };
+        if !iter.apply_reuse(obj, previous, step, vm) {
+            return false;
+        }
+        self.lasti.store(next_lasti as u32, atomic::Ordering::Relaxed);
+        true
     }
 
     #[inline]

@@ -695,6 +695,61 @@ impl PyRangeIterator {
             None
         }
     }
+
+    /// Fold the step into the int the previous iteration handed out instead of
+    /// building a new one, which is what makes `for i in range(n)` cost exactly
+    /// one block per iteration today.
+    ///
+    /// Cheap half of that decision: the step operand plus the value the loop
+    /// variable must currently hold. Runs before anything touches the frame's
+    /// local slot, so a loop over pooled small ints - where reuse can save
+    /// nothing - costs two integer compares instead of a failed probe.
+    #[inline]
+    pub(crate) fn reuse_plan(&self, value: isize) -> Option<(&'static BigInt, isize)> {
+        let step = crate::builtins::int::small_step(self.step)?;
+        let previous = value.checked_sub(self.step)?;
+        // The immortal small-int pool owns those objects and shares them with
+        // every other user of the same number; the bounds come from the pool
+        // itself so the two can never disagree.
+        if i32::try_from(previous).is_ok_and(|p| Context::INT_CACHE_POOL_RANGE.contains(&p)) {
+            return None;
+        }
+        Some((step, previous))
+    }
+
+    /// Finish the reuse started by `reuse_plan` on the object the loop variable
+    /// currently holds. Legal only when nobody else can observe it change: its
+    /// value must be the one this iterator yielded last (which also rules out a
+    /// recycled address holding a different int), it must be the only strong
+    /// reference, never leaked (pooled/immortal small ints) nor published to a
+    /// lock-free cache, and no other thread may exist.
+    #[inline]
+    pub(crate) fn apply_reuse(
+        &self,
+        obj: &crate::PyObject,
+        previous: isize,
+        step: &BigInt,
+        vm: &VirtualMachine,
+    ) -> bool {
+        if vm.state.thread_count.load() != 0 {
+            return false;
+        }
+        if obj.strong_count() != 1 || obj.rc_is_leaked() || obj.rc_is_published() {
+            return false;
+        }
+        // `bool` and `IntEnum` are excluded by the exact-type test: their
+        // observers expect their identity to be stable.
+        let Some(payload) = obj.downcast_ref_if_exact::<PyInt>(vm) else {
+            return false;
+        };
+        if payload.as_bigint().to_isize() != Some(previous) {
+            return false;
+        }
+        // SAFETY: the checks above are exactly the preconditions of
+        // `add_step_in_place`.
+        unsafe { payload.add_step_in_place(step) };
+        true
+    }
 }
 
 impl SelfIter for PyRangeIterator {}

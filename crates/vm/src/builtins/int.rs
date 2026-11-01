@@ -79,8 +79,22 @@ impl PyPayload for PyInt {
     }
 }
 
-macro_rules! impl_into_pyobject_int {
-    ($($t:ty)*) => {$(
+/// Shared step operands for an in-place loop-variable update.
+///
+/// Folding a step into an existing `BigInt` needs an operand, and malachite
+/// builds one only by allocating - so the steps real loops use are built once
+/// and shared. A step outside this table keeps the allocating path.
+pub(crate) fn small_step(step: isize) -> Option<&'static BigInt> {
+    const MAX: isize = 64;
+    static STEPS: std::sync::OnceLock<Vec<BigInt>> = std::sync::OnceLock::new();
+    if step == 0 || step > MAX || step < -MAX {
+        return None;
+    }
+    let table = STEPS.get_or_init(|| (-(MAX)..=MAX).map(|s| BigInt::from(s as i64)).collect());
+    table.get((step + MAX) as usize)
+}
+
+macro_rules! impl_into_pyobject_int {    ($($t:ty)*) => {$(
         impl ToPyObject for $t {
             fn to_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
                 vm.ctx.new_int(self).into()
@@ -283,6 +297,24 @@ impl PyInt {
     #[must_use]
     pub const fn as_bigint(&self) -> &BigInt {
         &self.value
+    }
+
+    /// Fold `step` into this value without allocating.
+    ///
+    /// `BigInt` exposes no setter, so the only way to move an `int` to its
+    /// successor without a fresh digits buffer is in-place arithmetic, which
+    /// reuses the buffer whenever the limb count does not grow.
+    ///
+    /// # Safety
+    /// The caller must have proved that one reference it exclusively controls is
+    /// the only strong reference to the object owning this payload, that the
+    /// object was never leaked (interned, pooled, immortal) or published to a
+    /// lock-free cache, and that no other interpreter thread is running. An
+    /// `int` whose value changes underneath an observer breaks Python, and no
+    /// invariant here is checked at compile time.
+    pub(crate) unsafe fn add_step_in_place(&self, step: &BigInt) {
+        let this = self as *const PyInt as *mut PyInt;
+        unsafe { (*this).value += step };
     }
 
     /// Fast decimal string conversion, using i64 path when possible.
