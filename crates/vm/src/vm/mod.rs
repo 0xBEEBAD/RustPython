@@ -1573,13 +1573,13 @@ impl VirtualMachine {
 
         match result {
             Ok(ExecutionResult::Return(value)) => {
-                self.exit_iframe(entry_state);
+                self.exit_iframe_traced(entry_state, Some(value.clone()));
                 Ok(value)
             }
             Ok(ExecutionResult::TailCall) => self.run_frame_fast_trampoline(iframe, entry_state),
             Ok(ExecutionResult::Yield(_)) => panic!("Yield in non-generator frame"),
             Err(exc) => {
-                self.exit_iframe(entry_state);
+                self.exit_iframe_traced(entry_state, None);
                 Err(exc)
             }
         }
@@ -1652,7 +1652,7 @@ impl VirtualMachine {
                             action = Action::EnterCallee(self.take_pending_tailcall());
                         }
                         Ok(ExecutionResult::Return(value)) => {
-                            self.exit_iframe(callee_entry);
+                            self.exit_iframe_traced(callee_entry, Some(value.clone()));
                             unsafe {
                                 if let Some(base) = callee.release_datastack_frame() {
                                     self.datastack_pop(base);
@@ -1662,7 +1662,7 @@ impl VirtualMachine {
                         }
                         Ok(ExecutionResult::Yield(_)) => panic!("Yield in non-generator frame"),
                         Err(exc) => {
-                            self.exit_iframe(callee_entry);
+                            self.exit_iframe_traced(callee_entry, None);
                             unsafe {
                                 if let Some(base) = callee.release_datastack_frame() {
                                     self.datastack_pop(base);
@@ -1702,7 +1702,7 @@ impl VirtualMachine {
                         }
                         Ok(ExecutionResult::Return(value)) => {
                             drop(_caller_refs);
-                            self.exit_iframe(caller_entry);
+                            self.exit_iframe_traced(caller_entry, Some(value.clone()));
                             if !caller_is_entry {
                                 unsafe {
                                     if let Some(base) = caller_iframe.release_datastack_frame() {
@@ -1715,7 +1715,7 @@ impl VirtualMachine {
                         Ok(ExecutionResult::Yield(_)) => panic!("Yield in non-generator frame"),
                         Err(exc) => {
                             drop(_caller_refs);
-                            self.exit_iframe(caller_entry);
+                            self.exit_iframe_traced(caller_entry, None);
                             if !caller_is_entry {
                                 unsafe {
                                     if let Some(base) = caller_iframe.release_datastack_frame() {
@@ -1761,7 +1761,7 @@ impl VirtualMachine {
                                 }
                                 Ok(ExecutionResult::Return(value)) => {
                                     drop(_caller_refs);
-                                    self.exit_iframe(caller_entry);
+                                    self.exit_iframe_traced(caller_entry, Some(value.clone()));
                                     if !caller_is_entry {
                                         unsafe {
                                             if let Some(base) =
@@ -1778,7 +1778,7 @@ impl VirtualMachine {
                                 }
                                 Err(new_exc) => {
                                     drop(_caller_refs);
-                                    self.exit_iframe(caller_entry);
+                                    self.exit_iframe_traced(caller_entry, None);
                                     if !caller_is_entry {
                                         unsafe {
                                             if let Some(base) =
@@ -1794,7 +1794,7 @@ impl VirtualMachine {
                         }
                         Ok(Some(ExecutionResult::Return(value))) => {
                             drop(_caller_refs);
-                            self.exit_iframe(caller_entry);
+                            self.exit_iframe_traced(caller_entry, Some(value.clone()));
                             if !caller_is_entry {
                                 unsafe {
                                     if let Some(base) = caller_iframe.release_datastack_frame() {
@@ -1809,7 +1809,7 @@ impl VirtualMachine {
                         }
                         Err(new_exc) => {
                             drop(_caller_refs);
-                            self.exit_iframe(caller_entry);
+                            self.exit_iframe_traced(caller_entry, None);
                             if !caller_is_entry {
                                 unsafe {
                                     if let Some(base) = caller_iframe.release_datastack_frame() {
@@ -2217,11 +2217,11 @@ impl VirtualMachine {
         f()
     }
 
-    pub fn with_frame<R, F: FnOnce(FrameObjectRef) -> PyResult<R>>(
+    pub fn with_frame(
         &self,
         frame: FrameObjectRef,
-        f: F,
-    ) -> PyResult<R> {
+        f: impl FnOnce(FrameObjectRef) -> PyResult<crate::frame::ExecutionResult>,
+    ) -> PyResult<crate::frame::ExecutionResult> {
         self.check_recursive_call("")?;
 
         // Native stack guard: check the C stack on every frame push.
@@ -2393,6 +2393,29 @@ impl VirtualMachine {
 
     /// Pop `iframe` from the frame chain: sync materialized state, restore
     /// exception, TLS unlink, GC tracking.
+    /// Unlink a fast-route frame, first firing its `return` trace event while
+    /// the frame is still the current one.
+    ///
+    /// The traced wrapper (`with_frame`, `resume_gen_frame`) is chosen when the
+    /// call is *made*, so a frame that started untraced and had `sys.settrace()`
+    /// installed - or `f_trace` set, which is what pdb and bdb do - mid-body
+    /// never passes through the code that fires the event. CPython consults the
+    /// tracer at frame exit instead, which is why its pdb prints a `--Return--`
+    /// stop for such a frame and ours did not. `value` is what the frame
+    /// returns, or None while unwinding, matching `PY_UNWIND` ->
+    /// `PyTrace_RETURN` with `arg = None`.
+    #[inline]
+    fn exit_iframe_traced(
+        &self,
+        state: IframeEntryState,
+        value: Option<crate::PyObjectRef>,
+    ) {
+        // A tracer that raises while leaving the frame is not propagated: this
+        // frame is already unwinding and the exit path has no error channel.
+        let _ = self.trace_event(crate::protocol::TraceEvent::Return, value);
+        self.exit_iframe(state);
+    }
+
     pub(crate) fn exit_iframe(&self, state: IframeEntryState) {
         let IframeEntryState {
             iframe_ptr,
@@ -2520,12 +2543,12 @@ impl VirtualMachine {
     /// FrameObject execution for generator/coroutine resume.
     /// Pushes a new exc_info slot (gi_exc_state) onto the chain,
     /// linking the generator's saved handled-exception.
-    pub fn resume_gen_frame<R, F: FnOnce(&Py<FrameObject>) -> PyResult<R>>(
+    pub fn resume_gen_frame(
         &self,
         frame: &FrameObjectRef,
         exc: Option<PyBaseExceptionRef>,
-        f: F,
-    ) -> PyResult<R> {
+        f: impl FnOnce(&Py<FrameObject>) -> PyResult<crate::frame::ExecutionResult>,
+    ) -> PyResult<crate::frame::ExecutionResult> {
         self.check_recursive_call("")?;
         if self.check_c_stack_overflow() {
             return Err(self.new_recursion_error(String::new()));
@@ -2576,14 +2599,17 @@ impl VirtualMachine {
     /// - Fire `TraceEvent::Call`; if the trace function returns non-None,
     ///   install it as the per-frame `f_trace`.
     /// - Execute the closure (the actual frame body).
-    /// - Fire `TraceEvent::Return` on both normal return **and** exception
-    ///   unwind (`PY_UNWIND` → `PyTrace_RETURN` with `arg = None`).
-    ///   Propagate any trace-function error, replacing the original exception.
-    fn dispatch_traced_frame<R, F: FnOnce(&Py<FrameObject>) -> PyResult<R>>(
+    /// - Fire `TraceEvent::Return` on normal return, on a yield, **and** on
+    ///   exception unwind. The arg is the value the frame handed to its caller:
+    ///   CPython reports a generator's `PyTrace_YRETURN` as a plain `'return'`
+    ///   event carrying the yielded value, and fires `arg = None` when the
+    ///   frame unwound. Propagate any trace-function error, replacing the
+    ///   original exception.
+    fn dispatch_traced_frame(
         &self,
         frame: &Py<FrameObject>,
-        f: F,
-    ) -> PyResult<R> {
+        f: impl FnOnce(&Py<FrameObject>) -> PyResult<crate::frame::ExecutionResult>,
+    ) -> PyResult<crate::frame::ExecutionResult> {
         use crate::protocol::TraceEvent;
 
         // Fire 'call' trace event. current_frame() now returns the callee.
@@ -2604,7 +2630,12 @@ impl VirtualMachine {
                     .cold_opt()
                     .is_some_and(|c| c.trace.lock().is_some()))
         {
-            let ret_result = self.trace_event(TraceEvent::Return, None);
+            let ret_arg = match &result {
+                Ok(crate::frame::ExecutionResult::Return(value))
+                | Ok(crate::frame::ExecutionResult::Yield(value)) => Some(value.clone()),
+                _ => None,
+            };
+            let ret_result = self.trace_event(TraceEvent::Return, ret_arg);
             // call_trace_protected: if trace function raises, its error
             // replaces the original exception.
             ret_result?;
