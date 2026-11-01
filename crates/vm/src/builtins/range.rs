@@ -71,6 +71,7 @@ pub struct PyRange {
 // spell-checker:ignore MAXFREELIST
 thread_local! {
     static RANGE_FREELIST: crate::object::FreeList<PyRange> = const { crate::object::FreeList::new() };
+    static RANGE_ITER_FREELIST: crate::object::FreeList<PyRangeIterator> = const { crate::object::FreeList::new() };
 }
 
 impl PyPayload for PyRange {
@@ -634,9 +635,32 @@ pub(crate) struct PyRangeIterator {
 }
 
 impl PyPayload for PyRangeIterator {
+    // A nested `for i in range(...)` builds one iterator per outer step, so the
+    // husk is recycled instead of going back to the allocator every time.
+    const MAX_FREELIST: usize = 8;
+    const HAS_FREELIST: bool = true;
+
     #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {
         ctx.types.range_iterator_type
+    }
+
+    #[inline]
+    unsafe fn freelist_push(obj: *mut PyObject) -> bool {
+        RANGE_ITER_FREELIST
+            .try_with(|fl| unsafe { fl.push(obj) })
+            .unwrap_or(false)
+    }
+
+    #[inline]
+    unsafe fn freelist_pop(_payload: &Self) -> Option<NonNull<PyObject>> {
+        if crate::perf_debug::ablated(crate::perf_debug::RANGE_ITER) {
+            return None;
+        }
+        RANGE_ITER_FREELIST
+            .try_with(|fl| unsafe { fl.pop() })
+            .ok()
+            .flatten()
     }
 }
 
@@ -805,10 +829,12 @@ impl TryFromObject for RangeIndex {
             i @ PyInt => Ok(Self::Int(i)),
             s @ PySlice => Ok(Self::Slice(s)),
             obj => {
-                let val = obj.try_index(vm).map_err(|_| vm.new_type_error(format!(
-                    "range indices must be integers or slices, not {}",
-                    obj.class().name()
-                )))?;
+                let val = obj.try_index(vm).map_err(|_| {
+                    vm.new_type_error(format!(
+                        "range indices must be integers or slices, not {}",
+                        obj.class().name()
+                    ))
+                })?;
                 Ok(Self::Int(val))
             }
         })

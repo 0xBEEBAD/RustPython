@@ -21,6 +21,11 @@
 //!   of folding the step into the loop variable's own object
 //! * `exitclone` - clone a frame's return value on every exit instead of only
 //!   when a trace or profile observer is waiting for it
+//! * `rangeiter` - allocate a fresh `range_iterator` for every outer loop instead
+//!   of recycling a husk from the type's freelist
+//! * `excfuse` - run an `except` clause's `CHECK_EXC_MATCH` and its
+//!   `POP_JUMP_IF_FALSE` as two instructions, and validate every clause target
+//!   through the MRO instead of answering an identical class with one compare
 
 use std::sync::OnceLock;
 
@@ -59,6 +64,15 @@ pub(crate) const RANGE_INT: u32 = 32768;
 /// anyone is watching for a `'return'` trace event, which is what the exit path
 /// did before the clone was moved behind the `exit_event_wanted` test.
 pub(crate) const EXIT_CLONE: u32 = 65536;
+/// Ablating this makes every `iter(range(...))` go to the allocator again
+/// instead of reusing a `range_iterator` husk, which is what a nested range loop
+/// paid per outer step before the type got a freelist.
+pub(crate) const RANGE_ITER: u32 = 131072;
+/// Ablating this splits an `except` clause back into `CHECK_EXC_MATCH` +
+/// `POP_JUMP_IF_FALSE` and routes every single-class target through the MRO
+/// validation, which is what the clause test did before the pair was fused and
+/// the identical-class compare was added.
+pub(crate) const EXC_FUSE: u32 = 262144;
 
 /// True when the named optimization is ablated through `LUNA_ABLATE`.
 pub(crate) fn ablated(bit: u32) -> bool {
@@ -85,6 +99,8 @@ pub(crate) fn ablated(bit: u32) -> bool {
                     "stubcall" => STUB_CALL,
                     "rangeint" => RANGE_INT,
                     "exitclone" => EXIT_CLONE,
+                    "rangeiter" => RANGE_ITER,
+                    "excfuse" => EXC_FUSE,
                     _ => 0,
                 };
             }
