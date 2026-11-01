@@ -2788,7 +2788,7 @@ impl SetAttr for PyType {
         // Drop old value OUTSIDE the type lock to avoid deadlock:
         // dropping may trigger weakref callbacks → method calls →
         // LOAD_ATTR specialization → version_for_specialization → type lock.
-        let _prev_value = Self::with_type_lock(vm, || {
+        let prev_value = Self::with_type_lock(vm, || {
             // Invalidate inline caches before modifying attributes.
             // This ensures other threads see the version invalidation before
             // any attribute changes, preventing use-after-free of cached descriptors.
@@ -2797,28 +2797,35 @@ impl SetAttr for PyType {
             let prev_value = if let PySetterValue::Assign(value) = value {
                 zelf.attributes.write().insert(attr_name, value)
             } else {
-                let prev_value = zelf.attributes.write().shift_remove(attr_name); // TODO: swap_remove applicable?
-                if prev_value.is_none() {
-                    return Err(vm.new_attribute_error(format!(
-                        "type object '{}' has no attribute '{}'",
-                        zelf.name(),
-                        attr_name,
-                    )));
-                }
-                prev_value
+                zelf.attributes.write().shift_remove(attr_name) // TODO: swap_remove applicable?
             };
 
             // Keep the slot-table rewrite inside the same transaction as the
-            // dict mutation and version invalidation.
-            if attr_name.as_wtf8().starts_with("__") && attr_name.as_wtf8().ends_with("__") {
+            // dict mutation and version invalidation. A delete that found nothing
+            // must not rewrite the slot table.
+            let dunder = attr_name.as_wtf8().starts_with("__") && attr_name.as_wtf8().ends_with("__");
+            if dunder && (assign || prev_value.is_some()) {
                 if assign {
                     zelf.update_slot::<true>(attr_name, &vm.ctx);
                 } else {
                     zelf.update_slot::<false>(attr_name, &vm.ctx);
                 }
             }
-            Ok(prev_value)
-        })?;
+            prev_value
+        });
+        if !assign && prev_value.is_none() {
+            // CPython puts `name` and `obj` on a class-side delete, and
+            // traceback's suggestion machinery does not fire without them. The
+            // exception is augmented outside the type lock: setting attributes on
+            // it reaches the same global mutex `with_type_lock` holds.
+            let exc = vm.new_attribute_error(format!(
+                "type object '{}' has no attribute '{}'",
+                zelf.name(),
+                attr_name
+            ));
+            vm.set_attribute_error_context(&exc, zelf.to_owned().into(), attr_name.to_owned());
+            return Err(exc);
+        }
         Ok(())
     }
 }

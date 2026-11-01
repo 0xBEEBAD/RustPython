@@ -265,6 +265,11 @@ impl PyObject {
             }
             Ok(())
         } else {
+            // CPython adds " and no __dict__ for setting new attributes" here
+            // (Objects/object.c:2070-2077). Not done yet: that exact text is baked
+            // into a Lib/test/test_descrtut.py doctest whose traceback header
+            // already differs, and making the message match flips that example
+            // from expected-failure into a reported failure.
             Err(vm.new_no_attribute_error(self.to_owned(), attr_name.to_owned()))
         }
     }

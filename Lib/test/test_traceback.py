@@ -4698,6 +4698,10 @@ class SuggestionFormattingTestBase(SuggestionFormattingTestMixin):
         )
         return result_lines[0]
 
+    # TODO: RUSTPYTHON; traceback._is_lazy_import reads types.LazyImportType,
+    # which only exists once PEP 810 laziness lands, so _compute_suggestion_error
+    # swallows the AttributeError and returns None for ImportError.
+    @unittest.expectedFailure
     def test_import_from_suggestions(self):
         substitution = textwrap.dedent("""\
             noise = more_noise = a = bc = None
@@ -4748,6 +4752,8 @@ class SuggestionFormattingTestBase(SuggestionFormattingTestMixin):
             actual = self.get_import_from_suggestion(code, 'bluch')
             self.assertIn(suggestion, actual)
 
+    # TODO: RUSTPYTHON; needs types.LazyImportType (see test_import_from_suggestions).
+    @unittest.expectedFailure
     def test_import_from_suggestions_underscored(self):
         code = "bluch = None"
         self.assertIn("'bluch'", self.get_import_from_suggestion(code, 'blach'))
@@ -4759,6 +4765,8 @@ class SuggestionFormattingTestBase(SuggestionFormattingTestMixin):
         self.assertIn("'_bluch'", self.get_import_from_suggestion(code, '_luch'))
         self.assertNotIn("'_bluch'", self.get_import_from_suggestion(code, 'bluch'))
 
+    # TODO: RUSTPYTHON; needs types.LazyImportType (see test_import_from_suggestions).
+    @unittest.expectedFailure
     def test_import_from_suggestions_non_string(self):
         modWithNonStringAttr = textwrap.dedent("""\
             globals()[0] = 1
