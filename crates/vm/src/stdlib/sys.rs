@@ -1110,6 +1110,39 @@ pub mod sys {
         vm.ctx.new_dict()
     }
 
+    /// Heap allocation counters, only present in a `--features alloc-stats`
+    /// build: `{"allocs", "frees", "bytes", "sizes"}` where `sizes` lists
+    /// `(rounded_size, count)` pairs. Pass `reset=True` to read the counters
+    /// and arm the next window in one call, which is how a probe measures one
+    /// operation at a time.
+    #[cfg(feature = "alloc-stats")]
+    #[pyfunction]
+    fn _alloc_stats(reset: OptionalArg, vm: &VirtualMachine) -> PyResult<PyDictRef> {
+        let stats = if reset.is_present() {
+            crate::alloc_stats::Stats::reset()
+        } else {
+            crate::alloc_stats::Stats::snapshot()
+        };
+        let dict = vm.ctx.new_dict();
+        dict.set_item("allocs", stats.allocs.to_pyobject(vm), vm)?;
+        dict.set_item("frees", stats.frees.to_pyobject(vm), vm)?;
+        dict.set_item("bytes", stats.bytes.to_pyobject(vm), vm)?;
+        let mut sizes = Vec::new();
+        for (bucket, count) in stats.counts.iter().enumerate().skip(1) {
+            if *count != 0 {
+                sizes.push(
+                    vm.ctx.new_tuple(vec![
+                        (bucket * crate::alloc_stats::BUCKET_GRAIN).to_pyobject(vm),
+                        count.to_pyobject(vm),
+                    ])
+                    .into(),
+                );
+            }
+        }
+        dict.set_item("sizes", vm.ctx.new_list(sizes).into(), vm)?;
+        Ok(dict)
+    }
+
     #[pyfunction]
     fn gettrace(vm: &VirtualMachine) -> PyObjectRef {
         vm.trace_func.borrow().clone()

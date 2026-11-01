@@ -48,6 +48,8 @@ pub use rustpython_derive::*;
 pub(crate) mod macros;
 
 mod anystr;
+#[cfg(feature = "alloc-stats")]
+pub mod alloc_stats;
 pub mod buffer;
 pub mod builtins;
 pub mod byte;
