@@ -1573,7 +1573,7 @@ impl VirtualMachine {
 
         match result {
             Ok(ExecutionResult::Return(value)) => {
-                self.exit_iframe_traced(entry_state, Some(value.clone()));
+                self.exit_iframe_traced(entry_state, Some(&value));
                 Ok(value)
             }
             Ok(ExecutionResult::TailCall) => self.run_frame_fast_trampoline(iframe, entry_state),
@@ -1652,7 +1652,7 @@ impl VirtualMachine {
                             action = Action::EnterCallee(self.take_pending_tailcall());
                         }
                         Ok(ExecutionResult::Return(value)) => {
-                            self.exit_iframe_traced(callee_entry, Some(value.clone()));
+                            self.exit_iframe_traced(callee_entry, Some(&value));
                             unsafe {
                                 if let Some(base) = callee.release_datastack_frame() {
                                     self.datastack_pop(base);
@@ -1702,7 +1702,7 @@ impl VirtualMachine {
                         }
                         Ok(ExecutionResult::Return(value)) => {
                             drop(_caller_refs);
-                            self.exit_iframe_traced(caller_entry, Some(value.clone()));
+                            self.exit_iframe_traced(caller_entry, Some(&value));
                             if !caller_is_entry {
                                 unsafe {
                                     if let Some(base) = caller_iframe.release_datastack_frame() {
@@ -1761,7 +1761,7 @@ impl VirtualMachine {
                                 }
                                 Ok(ExecutionResult::Return(value)) => {
                                     drop(_caller_refs);
-                                    self.exit_iframe_traced(caller_entry, Some(value.clone()));
+                                    self.exit_iframe_traced(caller_entry, Some(&value));
                                     if !caller_is_entry {
                                         unsafe {
                                             if let Some(base) =
@@ -1794,7 +1794,7 @@ impl VirtualMachine {
                         }
                         Ok(Some(ExecutionResult::Return(value))) => {
                             drop(_caller_refs);
-                            self.exit_iframe_traced(caller_entry, Some(value.clone()));
+                            self.exit_iframe_traced(caller_entry, Some(&value));
                             if !caller_is_entry {
                                 unsafe {
                                     if let Some(base) = caller_iframe.release_datastack_frame() {
@@ -2405,16 +2405,20 @@ impl VirtualMachine {
     /// returns, or None while unwinding, matching `PY_UNWIND` ->
     /// `PyTrace_RETURN` with `arg = None`.
     #[inline]
-    fn exit_iframe_traced(
-        &self,
-        state: IframeEntryState,
-        value: Option<crate::PyObjectRef>,
-    ) {
-        if self.exit_event_wanted(unsafe { &*state.iframe_ptr }) {
+    fn exit_iframe_traced(&self, state: IframeEntryState, value: Option<&crate::PyObjectRef>) {
+        let wanted = self.exit_event_wanted(unsafe { &*state.iframe_ptr });
+        if crate::perf_debug::ablated(crate::perf_debug::EXIT_CLONE) {
+            // Pre-fix traffic: one incref/decref pair per frame exit even though
+            // nobody is watching for the event.
+            let event_value = value.cloned();
+            if wanted {
+                let _ = self.trace_event(crate::protocol::TraceEvent::Return, event_value);
+            }
+        } else if wanted {
             // A tracer that raises while leaving the frame is not propagated:
             // this frame is already unwinding and the exit path has no error
             // channel.
-            let _ = self.trace_event(crate::protocol::TraceEvent::Return, value);
+            let _ = self.trace_event(crate::protocol::TraceEvent::Return, value.cloned());
         }
         self.exit_iframe(state);
     }

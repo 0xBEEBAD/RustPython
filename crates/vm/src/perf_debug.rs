@@ -19,46 +19,52 @@
 //! * `stubcall` - return None from an exact-args Python call without running the callee
 //! * `rangeint` - allocate a fresh int for every `for i in range(n)` step instead
 //!   of folding the step into the loop variable's own object
+//! * `exitclone` - clone a frame's return value on every exit instead of only
+//!   when a trace or profile observer is waiting for it
 
 use std::sync::OnceLock;
 
-pub(crate) const NEXT_FAST: u16 = 1;
-pub(crate) const QUICKENED: u16 = 2;
+pub(crate) const NEXT_FAST: u32 = 1;
+pub(crate) const QUICKENED: u32 = 2;
 /// Ablating this routes the exact-args Python call fast path back through a
 /// materialized FrameObject (`prepare_exact_args_frame` + `run_frame`) instead
 /// of the frameless `invoke_exact_args_slots`, so the two can be compared
 /// inside one binary and one profile.
-pub(crate) const FRAMELESS: u16 = 4;
+pub(crate) const FRAMELESS: u32 = 4;
 /// Ablating this keeps `CallPyExactArgs` on the recursive route (invoke the
 /// callee from the caller's instruction loop) instead of handing the prepared
 /// callee frame to the TailCall trampoline, so the two can be compared inside
 /// one binary and one profile.
-pub(crate) const NO_TAILCALL: u16 = 16384;
+pub(crate) const NO_TAILCALL: u32 = 16384;
 /// Measurement only: return `None` from the exact-args invoke without running
 /// the callee, which isolates CALL dispatch and argument moves from everything
 /// the callee costs. Breaks program semantics, so it is reachable only through
 /// an explicit `LUNA_ABLATE=stubcall`.
-pub(crate) const STUB_CALL: u16 = 512;
-pub(crate) const ZERO_ARG: u16 = 8;
-pub(crate) const CLASS_CALL: u16 = 16;
-pub(crate) const STR_METHOD: u16 = 32;
-pub(crate) const STR_CREATE: u16 = 64;
-pub(crate) const SPLIT: u16 = 128;
-pub(crate) const SLICE_FAST: u16 = 256;
-pub(crate) const JOIN: u16 = 1024;
-pub(crate) const LAZY_DICT: u16 = 2048;
-pub(crate) const EXC_CTOR: u16 = 4096;
-pub(crate) const GEN_CLOSE: u16 = 8192;
+pub(crate) const STUB_CALL: u32 = 512;
+pub(crate) const ZERO_ARG: u32 = 8;
+pub(crate) const CLASS_CALL: u32 = 16;
+pub(crate) const STR_METHOD: u32 = 32;
+pub(crate) const STR_CREATE: u32 = 64;
+pub(crate) const SPLIT: u32 = 128;
+pub(crate) const SLICE_FAST: u32 = 256;
+pub(crate) const JOIN: u32 = 1024;
+pub(crate) const LAZY_DICT: u32 = 2048;
+pub(crate) const EXC_CTOR: u32 = 4096;
+pub(crate) const GEN_CLOSE: u32 = 8192;
 /// Ablating this makes a `for i in range(n)` loop allocate a fresh int at every
 /// step again, instead of folding the step into the object the previous
 /// iteration handed out, so the two can be compared inside one binary.
-pub(crate) const RANGE_INT: u16 = 32768;
+pub(crate) const RANGE_INT: u32 = 32768;
+/// Ablating this clones the frame's return value on every exit, whether or not
+/// anyone is watching for a `'return'` trace event, which is what the exit path
+/// did before the clone was moved behind the `exit_event_wanted` test.
+pub(crate) const EXIT_CLONE: u32 = 65536;
 
 /// True when the named optimization is ablated through `LUNA_ABLATE`.
-pub(crate) fn ablated(bit: u16) -> bool {
-    static MASK: OnceLock<u16> = OnceLock::new();
+pub(crate) fn ablated(bit: u32) -> bool {
+    static MASK: OnceLock<u32> = OnceLock::new();
     let mask = *MASK.get_or_init(|| {
-        let mut mask = 0u16;
+        let mut mask = 0u32;
         if let Some(value) = std::env::var_os("LUNA_ABLATE") {
             for part in value.to_string_lossy().split(',') {
                 mask |= match part.trim() {
@@ -78,6 +84,7 @@ pub(crate) fn ablated(bit: u16) -> bool {
                     "notail" => NO_TAILCALL,
                     "stubcall" => STUB_CALL,
                     "rangeint" => RANGE_INT,
+                    "exitclone" => EXIT_CLONE,
                     _ => 0,
                 };
             }
