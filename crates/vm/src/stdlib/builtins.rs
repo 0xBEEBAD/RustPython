@@ -1857,6 +1857,7 @@ pub fn init_module(vm: &VirtualMachine, module: &Py<PyModule>) {
         "complex" => ctx.types.complex_type.to_owned(),
         "dict" => ctx.types.dict_type.to_owned(),
         "frozendict" => ctx.types.frozendict_type.to_owned(),
+        "sentinel" => ctx.types.sentinel_type.to_owned(),
         "enumerate" => ctx.types.enumerate_type.to_owned(),
         "float" => ctx.types.float_type.to_owned(),
         "frozenset" => ctx.types.frozenset_type.to_owned(),

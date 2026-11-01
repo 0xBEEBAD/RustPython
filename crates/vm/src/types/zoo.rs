@@ -4,7 +4,8 @@ use crate::{
         asyncgenerator, bool_, builtin_func, bytearray, bytes, capsule, classmethod, code, complex,
         coroutine, descriptor, dict, enumerate, filter, float, frame, frame_locals_proxy, function,
         frozendict, generator, genericalias, getset, int, interpolation, iter, list, map,
-        mappingproxy, memory, module, namespace, object, property, pystr, range, set, singletons,
+        mappingproxy, memory, module, namespace, object, property, pystr, range, sentinel, set,
+        singletons,
         slice, staticmethod, super_, template, traceback, tuple,
         type_::{self, PyType},
         union_, weakproxy, weakref, zip,
@@ -36,6 +37,7 @@ pub struct TypeZoo {
     pub coroutine_wrapper_type: &'static Py<PyType>,
     pub dict_type: &'static Py<PyType>,
     pub frozendict_type: &'static Py<PyType>,
+    pub sentinel_type: &'static Py<PyType>,
     pub enumerate_type: &'static Py<PyType>,
     pub filter_type: &'static Py<PyType>,
     pub float_type: &'static Py<PyType>,
@@ -136,6 +138,7 @@ impl TypeZoo {
             complex_type: complex::PyComplex::init_builtin_type(),
             dict_type: dict::PyDict::init_builtin_type(),
             frozendict_type: frozendict::PyFrozenDict::init_builtin_type(),
+            sentinel_type: sentinel::PySentinel::init_builtin_type(),
             enumerate_type: enumerate::PyEnumerate::init_builtin_type(),
             float_type: float::PyFloat::init_builtin_type(),
             frozenset_type: set::PyFrozenSet::init_builtin_type(),
@@ -232,6 +235,7 @@ impl TypeZoo {
         tuple::init(context);
         dict::init(context);
         frozendict::init(context);
+        sentinel::init(context);
         builtin_func::init(context);
         function::init(context);
         staticmethod::init(context);

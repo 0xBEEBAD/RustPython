@@ -198,6 +198,9 @@ fn is_unionable(obj: PyObjectRef, vm: &VirtualMachine) -> bool {
     let cls = obj.class();
     cls.is(vm.ctx.types.none_type)
         || obj.downcastable::<PyType>()
+        // CPython 3.15 lets sentinels appear in `X | Y` type expressions
+        // (Objects/unionobject.c is_unionable has a PySentinel_Check branch).
+        || obj.downcastable::<crate::builtins::PySentinel>()
         || cls.fast_issubclass(vm.ctx.types.generic_alias_type)
         || cls.is(vm.ctx.types.union_type)
         || obj.downcast_ref::<TypeAliasType>().is_some()

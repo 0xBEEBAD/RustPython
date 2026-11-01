@@ -25,6 +25,8 @@ pub(crate) mod dict;
 pub use dict::{PyDict, PyDictRef};
 pub(crate) mod frozendict;
 pub use frozendict::PyFrozenDict;
+pub(crate) mod sentinel;
+pub use sentinel::PySentinel;
 pub(crate) mod enumerate;
 pub use enumerate::PyEnumerate;
 pub(crate) mod filter;
