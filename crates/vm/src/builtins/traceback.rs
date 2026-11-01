@@ -123,6 +123,28 @@ impl PyTracebackRef {
     }
 }
 
+impl Drop for PyTraceback {
+    fn drop(&mut self) {
+        // A chain reached at interpreter teardown, or by the collector freeing a
+        // cycle, arrives here already untracked - and the trashcan engages only
+        // for tracked objects - so nothing bounds the recursion depth. Empty our
+        // own `next` first and walk the chain: each link then deallocates with a
+        // payload Drop that stops at once, costing constant native stack.
+        let mut current = self.next.lock().take();
+        while let Some(tb) = current {
+            // Stop at a link someone else can still reach - their tail must stay
+            // whole - or one whose type has a `__del__`, which runs before the
+            // payload Drop and could resurrect a link we already emptied.
+            if tb.as_object().strong_count() != 1
+                || tb.as_object().class().slots.del.load().is_some()
+            {
+                break;
+            }
+            current = tb.next.lock().take();
+        }
+    }
+}
+
 pub(crate) fn init(context: &'static Context) {
     PyTraceback::extend_class(context, context.types.traceback_type);
 }
