@@ -912,7 +912,6 @@ class BasicTest(BaseTest):
                     self.assertFalse(same_path(path1, path2))
 
     # gh-126084: venvwlauncher should run pythonw, not python
-    @unittest.expectedFailureIfWindows("TODO: RUSTPYTHON")
     @requireVenvCreate
     @unittest.skipUnless(os.name == 'nt', 'only relevant on Windows')
     def test_venvwlauncher(self):
