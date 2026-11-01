@@ -1335,7 +1335,71 @@ pub struct FrameObject {
     pub(crate) iframe: FrameUnsafeCell<Option<InterpreterFrame>>,
 }
 
+/// Materialize every frame of a foreign thread's chain and link them with
+/// `f_back`, so a traceback captured in that thread can be walked from here.
+/// Returns the innermost frame, which is what `sys._current_frames()` reports.
+///
+/// CPython needs no such step: its visible frames *are* the live ones and each
+/// carries a real `f_back`. Here only the owning thread's chain is walkable by
+/// pointer, so a cross-thread observer has to turn each `InterpreterFrame` into
+/// a `FrameObject` and record its caller as `retained_back`.
+///
+/// # Safety
+/// `top` belongs to another thread. The world must be stopped, which parks that
+/// thread at a safepoint so its chain cannot pop, free or advance while it is
+/// read.
+pub(crate) unsafe fn complete_thread_chain(
+    vm: &VirtualMachine,
+    top: *const InterpreterFrame,
+) -> Option<FrameObjectRef> {
+    let mut cur = top;
+    let mut head = None;
+    let mut child: Option<FrameObjectRef> = None;
+    while !cur.is_null() {
+        let iframe = unsafe { &*cur };
+        // SAFETY: the caller holds the stopped world.
+        let fo = iframe.materialize(vm).to_owned();
+        unsafe { fo.sync_from_live(iframe) };
+        if head.is_none() {
+            head = Some(fo.to_owned());
+        }
+        if let Some(inner) = child.take() {
+            let mut guard = inner.iframe().cold().retained_back.lock();
+            if guard.is_none() {
+                *guard = Some(fo.clone());
+            }
+        }
+        child = Some(fo);
+        cur = iframe.previous();
+    }
+    head
+}
+
 impl FrameObject {
+    /// Copy the live interpreter state - bytecode position, last reported line
+    /// and fast locals - into this materialized snapshot.
+    ///
+    /// A snapshot taken while its frame is still running goes stale as the frame
+    /// advances, so an observer that reaches a foreign thread's chain (or this
+    /// thread's own chain through a traceback) would report where the frame was,
+    /// not where it is. CPython needs no equivalent step because its visible
+    /// frames *are* the live frames.
+    ///
+    /// # Safety
+    /// `live` must be the `InterpreterFrame` this snapshot was materialized from,
+    /// and its owning thread must be parked (stop-the-world) or be the caller.
+    pub(crate) unsafe fn sync_from_live(&self, live: &InterpreterFrame) {
+        #[allow(unused_imports)]
+        use rustpython_common::atomic::Radium;
+        let snap = unsafe { self.iframe_mut() };
+        unsafe { snap.localsplus.sync_fastlocals_from(&live.localsplus) };
+        snap.prev_line.set(live.prev_line.get());
+        snap.lasti.store(
+            live.lasti.load(core::sync::atomic::Ordering::Relaxed),
+            core::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
     /// Shared access to the embedded interpreter frame.
     ///
     /// # Safety

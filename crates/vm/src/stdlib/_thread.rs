@@ -1204,43 +1204,25 @@ pub(crate) mod _thread {
                         // Current thread: materialize from TLS chain
                         crate::frame::current_thread_frame_materialize(vm).map(|frame| (*id, frame))
                     } else {
-                        // Other threads: try top_frame first (FrameObject),
-                        // fall back to top_iframe (may be a stack-allocated frame).
-                        let top = slot.top_frame.load(Ordering::Relaxed);
-                        if let Some(p) = core::ptr::NonNull::new(top) {
-                            let py = unsafe {
-                                &*Py::<crate::frame::FrameObject>::from_payload_ptr(p.as_ptr())
-                            };
-                            Some((*id, py.to_owned()))
+                        // Other threads: complete the chain from `top_iframe`,
+                        // which covers stack-allocated frames and links every
+                        // frame with `f_back`. The published `top_frame` is only a
+                        // fallback for the window before `top_iframe` is stored.
+                        let iframe_ptr = slot.top_iframe.load(Ordering::Relaxed)
+                            as *const crate::frame::InterpreterFrame;
+                        // SAFETY: world stopped -> owning thread is parked.
+                        let chain =
+                            unsafe { crate::frame::complete_thread_chain(vm, iframe_ptr) };
+                        if chain.is_some() {
+                            chain.map(|fo| (*id, fo))
                         } else {
-                            // Stack-allocated frame: materialize from top_iframe.
-                            // SAFETY: world stopped -> owning thread is parked.
-                            let iframe_ptr = slot.top_iframe.load(Ordering::Relaxed)
-                                as *const crate::frame::InterpreterFrame;
-                            if !iframe_ptr.is_null() {
-                                // Materialize the entire frame chain and link
-                                // retained_back so f_back works after STW ends.
-                                let mut cur = iframe_ptr;
-                                let mut child_fo: Option<crate::PyRef<crate::frame::FrameObject>> =
-                                    None;
-                                while !cur.is_null() {
-                                    let iframe = unsafe { &*cur };
-                                    let fo = iframe.materialize(vm).to_owned();
-                                    if let Some(child) = child_fo.take() {
-                                        let mut guard = child.iframe().cold().retained_back.lock();
-                                        if guard.is_none() {
-                                            *guard = Some(fo.clone());
-                                        }
-                                    }
-                                    child_fo = Some(fo);
-                                    cur = iframe.previous();
-                                }
-                                let iframe = unsafe { &*iframe_ptr };
-                                let fo = iframe.materialize(vm);
-                                Some((*id, fo.to_owned()))
-                            } else {
-                                None
-                            }
+                            let top = slot.top_frame.load(Ordering::Relaxed);
+                            core::ptr::NonNull::new(top).map(|p| {
+                                let py = unsafe {
+                                    &*Py::<crate::frame::FrameObject>::from_payload_ptr(p.as_ptr())
+                                };
+                                (*id, py.to_owned())
+                            })
                         }
                     }
                 })
@@ -1261,36 +1243,14 @@ pub(crate) mod _thread {
                         crate::frame::current_thread_frame_materialize(vm).map(|frame| (*id, frame))
                     } else {
                         // Other threads: use top_iframe to include
-                        // stack-allocated frames. Materialize the entire
-                        // chain and link retained_back so f_back works.
+                        // stack-allocated frames, and complete the whole chain so
+                        // `f_back` works from any frame the caller reaches.
                         // SAFETY: world stopped -> owning thread is parked.
                         let iframe_ptr = slot.top_iframe.load(Ordering::Relaxed)
                             as *const crate::frame::InterpreterFrame;
-                        if !iframe_ptr.is_null() {
-                            let mut cur = iframe_ptr;
-                            let mut child_fo: Option<crate::PyRef<crate::frame::FrameObject>> =
-                                None;
-                            while !cur.is_null() {
-                                let iframe = unsafe { &*cur };
-                                let fo = iframe.materialize(vm).to_owned();
-                                if let Some(child) = child_fo.take() {
-                                    let mut guard = child.iframe().cold().retained_back.lock();
-                                    if guard.is_none() {
-                                        *guard = Some(fo.clone());
-                                    }
-                                }
-                                child_fo = Some(fo);
-                                cur = iframe.previous();
-                            }
-                            let iframe = unsafe { &*iframe_ptr };
-                            let fo = iframe.materialize(vm);
-                            Some((*id, fo.to_owned()))
-                        } else {
-                            // No published frame for this thread (idle or in
-                            // the tiny window before top_iframe is stored);
-                            // same as unix: report no frame.
-                            None
-                        }
+                        // SAFETY: world stopped -> owning thread is parked.
+                        unsafe { crate::frame::complete_thread_chain(vm, iframe_ptr) }
+                            .map(|fo| (*id, fo))
                     }
                 })
                 .collect()

@@ -742,13 +742,32 @@ pub fn update_thread_exception(exc: Option<PyBaseExceptionRef>) {
 }
 
 /// Collect all threads' current exceptions for sys._current_exceptions().
-/// Acquires the global registry lock briefly, then reads each slot's exception atomically.
+///
+/// A foreign thread's traceback frames have no `f_back` until that thread's
+/// chain is materialized, so the chain is completed here - the same thing
+/// `sys._current_frames()` does. Stop-the-world is requested *before* the
+/// registry lock, because `stop_the_world` takes that same non-reentrant lock
+/// internally, and the guard is declared before the registry so the registry is
+/// released before the world restarts.
 #[cfg(feature = "threading")]
 pub fn get_all_current_exceptions(vm: &VirtualMachine) -> Vec<(u64, Option<PyBaseExceptionRef>)> {
+    use crate::frame::InterpreterFrame;
+
+    vm.state.stop_the_world.stop_the_world(vm);
+    scopeguard::defer! { vm.state.stop_the_world.start_the_world(vm); }
+    let current_ident = crate::stdlib::_thread::get_ident();
     let registry = vm.state.thread_frames.lock();
     registry
         .iter()
-        .map(|(id, slot)| (*id, slot.exception.to_owned()))
+        .map(|(id, slot)| {
+            let exc = slot.exception.to_owned();
+            if exc.is_some() && *id != current_ident {
+                let top = slot.top_iframe.load(Ordering::Relaxed) as *const InterpreterFrame;
+                // SAFETY: the world is stopped, so this thread's chain is stable.
+                unsafe { crate::frame::complete_thread_chain(vm, top) };
+            }
+            (*id, exc)
+        })
         .collect()
 }
 
