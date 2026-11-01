@@ -3801,9 +3801,17 @@ impl ExecutingFrame<'_> {
                 Ok(None)
             }
             Instruction::BuildTuple { count: size } => {
-                let elements = self.pop_multiple(size.get(arg) as usize).collect();
-                let list_obj = vm.ctx.new_tuple(elements);
-                self.push_value(list_obj.into());
+                // Reserve exactly: the drain iterator's concrete type is erased
+                // behind `impl ExactSizeIterator`, so `collect()` cannot use the
+                // trusted-length path and would start the Vec at std's
+                // minimum capacity of 4 - `PyTuple::new_ref` then shrinks it with
+                // `into_boxed_slice()`, which for arities 1-3 is a realloc that
+                // costs a whole extra allocation per tuple.
+                let count = size.get(arg) as usize;
+                let mut elements = Vec::with_capacity(count);
+                elements.extend(self.pop_multiple(count));
+                let tuple_obj = vm.ctx.new_tuple(elements);
+                self.push_value(tuple_obj.into());
                 Ok(None)
             }
             Instruction::BuildTemplate => {

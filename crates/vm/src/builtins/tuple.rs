@@ -95,9 +95,15 @@ unsafe impl Traverse for PyTuple {
         self.elements.as_slice().traverse(traverse_fn);
     }
 
-    fn clear(&mut self, out: &mut Vec<PyObjectRef>) {
+    fn clear(&mut self, _out: &mut Vec<PyObjectRef>) {
+        // Drop the elements here instead of handing them to the caller's sink.
+        // The sink is an empty `Vec`, so extending it allocates one block per
+        // tuple destroyed - the boxed slice is already owned and drops without
+        // allocating. Safe because the husk only reaches the freelist after this
+        // returns, so a `__del__` run by a dropped element cannot re-enter this
+        // payload through it.
         let elements = core::mem::take(self.elements.get_mut());
-        out.extend(elements.into_vec());
+        drop(elements);
     }
 }
 
