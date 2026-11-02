@@ -76,6 +76,13 @@ pub(crate) const EXIT_CLONE: u32 = 65536;
 /// instead of reusing a `range_iterator` husk, which is what a nested range loop
 /// paid per outer step before the type got a freelist.
 pub(crate) const RANGE_ITER: u32 = 131072;
+/// Measurement only: build the callee's frame and bind its arguments, then
+/// return without entering it. Together with `stubcall` (no frame at all) and
+/// `LUNA_STUB_BODY` (frame entered, body skipped) the three levels split a
+/// call into frame construction, frame enter/exit and the body's instructions.
+/// Reachable only while `LUNA_STUB_BODY` names the functions to spare, so the
+/// interpreter still boots.
+pub(crate) const NO_ENTER: u32 = 1048576;
 /// Ablating this routes a keyword call back through `FuncArgs` (argument `Vec`,
 /// a heap copy of every keyword name and a keyword map) instead of scattering
 /// its values straight into the callee's fastlocals slots, which is what such a
@@ -142,6 +149,7 @@ pub(crate) fn ablated(bit: u32) -> bool {
                     "rangeiter" => RANGE_ITER,
                     "excfuse" => EXC_FUSE,
                     "kwfast" => KW_FAST,
+                    "noenter" => NO_ENTER,
                     _ => 0,
                 };
             }

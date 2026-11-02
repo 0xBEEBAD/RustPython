@@ -1568,6 +1568,23 @@ impl VirtualMachine {
     pub fn run_frame_fast(&self, iframe: &mut crate::frame::InterpreterFrame) -> PyResult {
         use crate::frame::ExecutionResult;
 
+        // Measurement choke point. Every route that runs a Python frame comes
+        // through here, including the specialized exact-args arms that build
+        // their own frames and never pass `invoke_prepared_exact_args`.
+        // `noenter` stops once the frame exists and its arguments are bound;
+        // the body stub in `run_iframe` stops after the frame is entered, and
+        // `stubcall` stops before a frame is built at all.
+        if crate::perf_debug::stub_body_fragment().is_some()
+            && crate::perf_debug::ablated(crate::perf_debug::NO_ENTER)
+            && unsafe { &*iframe.code }
+                .qualname
+                .as_wtf8()
+                .as_str()
+                .is_ok_and(crate::perf_debug::body_stubbed)
+        {
+            return Ok(self.ctx.none());
+        }
+
         let entry_state = self.enter_iframe(iframe)?;
         let result = crate::frame::run_iframe(iframe, self);
 

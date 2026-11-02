@@ -903,10 +903,7 @@ impl Py<PyFunction> {
         // it applies only to the matching functions, which makes "no frame at
         // all" comparable with "a frame that does nothing" in one build.
         if crate::perf_debug::ablated(crate::perf_debug::STUB_CALL)
-            && (crate::perf_debug::stub_body_fragment().is_none()
-                || self.code.qualname.as_wtf8().as_str().is_ok_and(|qualname| {
-                    crate::perf_debug::body_stubbed(qualname)
-                }))
+            && (crate::perf_debug::stub_body_fragment().is_none() || self.stub_body_matches())
         {
             for slot in args.iter_mut() {
                 slot.take();
@@ -1003,6 +1000,22 @@ impl Py<PyFunction> {
             }
             arg_count + kwonly_count
         })
+    }
+
+    /// Whether the `LUNA_STUB_BODY` instrument claims this function.
+    ///
+    /// The measurement ablations that skip a callee only apply to the functions
+    /// the instrument names, so the same flags that make a probe readable leave
+    /// the interpreter's own startup calls alone.
+    #[inline]
+    fn stub_body_matches(&self) -> bool {
+        crate::perf_debug::stub_body_fragment().is_some()
+            && self
+                .code
+                .qualname
+                .as_wtf8()
+                .as_str()
+                .is_ok_and(crate::perf_debug::body_stubbed)
     }
 
     /// Run a call whose values are already laid out in parameter order.
