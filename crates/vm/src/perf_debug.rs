@@ -28,6 +28,8 @@
 //!   through the MRO instead of answering an identical class with one compare
 //! * `kwfast` - bind a keyword call through `FuncArgs` instead of scattering its
 //!   values into the callee's fastlocals slots
+//! * `defbind` - bind a call that needs defaults through `FuncArgs` instead of
+//!   writing the given values and the covering defaults into fastlocals
 //!
 //! `LUNA_STUB_BODY=<qualname prefix>` is a second, complementary instrument: the
 //! matching functions answer `None` before their first instruction, and
@@ -88,6 +90,10 @@ pub(crate) const NO_ENTER: u32 = 1048576;
 /// its values straight into the callee's fastlocals slots, which is what such a
 /// call did before the shape was recognized.
 pub(crate) const KW_FAST: u32 = 524288;
+/// Ablating this binds a call that leaves parameters to their `__defaults__`
+/// through `FuncArgs` and the generic filler instead of writing the given
+/// values and the covering defaults straight into fastlocals.
+pub(crate) const DEF_BIND: u32 = 2097152;
 /// Ablating this splits an `except` clause back into `CHECK_EXC_MATCH` +
 /// `POP_JUMP_IF_FALSE` and routes every single-class target through the MRO
 /// validation, which is what the clause test did before the pair was fused and
@@ -150,6 +156,7 @@ pub(crate) fn ablated(bit: u32) -> bool {
                     "excfuse" => EXC_FUSE,
                     "kwfast" => KW_FAST,
                     "noenter" => NO_ENTER,
+                    "defbind" => DEF_BIND,
                     _ => 0,
                 };
             }

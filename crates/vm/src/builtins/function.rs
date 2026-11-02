@@ -356,25 +356,23 @@ impl PyFunction {
         // in parameter order. It only runs from the branch where the function
         // has no `**kwargs`, so a collision outranks the "unexpected keyword
         // argument" error whatever order the call spelled its keywords in.
-        let posonly_collisions: Vec<&str> = if kwargs.is_none()
-            && code.posonlyarg_count > 0
-            && !func_args.kwargs.is_empty()
-        {
-            let mut hits = Vec::new();
-            for name in &code.varnames[..code.posonlyarg_count as usize] {
-                let param = name.as_str();
-                if func_args
-                    .kwargs
-                    .keys()
-                    .any(|key| key.as_str().is_ok_and(|s| s == param))
-                {
-                    hits.push(param);
+        let posonly_collisions: Vec<&str> =
+            if kwargs.is_none() && code.posonlyarg_count > 0 && !func_args.kwargs.is_empty() {
+                let mut hits = Vec::new();
+                for name in &code.varnames[..code.posonlyarg_count as usize] {
+                    let param = name.as_str();
+                    if func_args
+                        .kwargs
+                        .keys()
+                        .any(|key| key.as_str().is_ok_and(|s| s == param))
+                    {
+                        hits.push(param);
+                    }
                 }
-            }
-            hits
-        } else {
-            Vec::new()
-        };
+                hits
+            } else {
+                Vec::new()
+            };
         // Handle keyword arguments
         for (name, value) in func_args.kwargs {
             // Parameter names are plain identifiers, so a non-UTF-8 (surrogate) key
@@ -1002,6 +1000,64 @@ impl Py<PyFunction> {
         })
     }
 
+    /// Bind a positional call that leaves its tail to `__defaults__`, or `None`
+    /// if this is not that shape and the generic binder should answer it.
+    ///
+    /// `buf` is the caller's argument buffer, whose first `given` slots already
+    /// hold the values the call supplied, in parameter order (`self` of a bound
+    /// method included). The generic route reaches this case through a
+    /// mutex-guarded clone of the defaults pair, an owned argument `Vec`, a
+    /// keyword pass and a missing-argument scan before it writes a single slot;
+    /// measured, that cost a defaulted call ~46 ns more than an exact call of
+    /// the same width, where CPython's difference between the two is under 2 ns.
+    /// Here the defaults are read through the guard -- no clone of the tuple --
+    /// and the callee is entered the way an exact call is.
+    ///
+    /// Generators stay out: their call must produce a generator object rather
+    /// than run, and keyword-only parameters have their own defaults dict.
+    #[inline]
+    pub(crate) fn invoke_positional_defaults(
+        &self,
+        buf: &mut [Option<PyObjectRef>],
+        given: usize,
+        vm: &VirtualMachine,
+    ) -> Option<PyResult> {
+        if vm.use_tracing.get() || crate::perf_debug::ablated(crate::perf_debug::DEF_BIND) {
+            return None;
+        }
+        let code: &Py<PyCode> = &self.code;
+        let arg_count = code.arg_count as usize;
+        if arg_count > buf.len()
+            || !code.flags.contains(bytecode::CodeFlags::OPTIMIZED)
+            || code
+                .flags
+                .intersects(bytecode::CodeFlags::VARARGS | bytecode::CodeFlags::VARKEYWORDS)
+            || code.kwonlyarg_count != 0
+            || self.is_generator_like()
+        {
+            return None;
+        }
+        // The defaults tuple is read through the guard, but the guard must not
+        // outlive this statement: entering the callee runs arbitrary Python, and
+        // a recursive call to this same function -- or a `__defaults__` read from
+        // the body -- would re-lock it and deadlock. Cloning the tuple ref costs
+        // one refcount, not the tuple.
+        let Some(defaults) = self.defaults_and_kwdefaults.lock().0.clone() else {
+            return None;
+        };
+        let (first_slot, first_default, count) =
+            default_fill_plan(arg_count, defaults.len(), given)?;
+        for (slot, value) in buf
+            .iter_mut()
+            .skip(first_slot)
+            .zip(defaults.as_slice()[first_default..].iter())
+            .take(count)
+        {
+            *slot = Some(value.clone());
+        }
+        Some(self.invoke_bound_slots(&mut buf[..arg_count], vm))
+    }
+
     /// Whether the `LUNA_STUB_BODY` instrument claims this function.
     ///
     /// The measurement ablations that skip a callee only apply to the functions
@@ -1233,8 +1289,11 @@ impl PyFunction {
         if let Some(module) = guard.as_ref() {
             return module.clone();
         }
-        let module = vm
-            .unwrap_or_none(self.globals.get_item_opt(identifier!(vm, __name__), vm).unwrap_or(None));
+        let module = vm.unwrap_or_none(
+            self.globals
+                .get_item_opt(identifier!(vm, __name__), vm)
+                .unwrap_or(None),
+        );
         *guard = Some(module.clone());
         module
     }
@@ -2041,6 +2100,72 @@ fn kw_name_views(kwnames: &[PyObjectRef], index: usize) -> &Wtf8 {
         .downcast_ref::<PyStr>()
         .expect("kwnames must be strings")
         .as_wtf8()
+}
+
+/// Where a defaulted call takes its values from.
+///
+/// `pos_filled` parameters arrived positionally; the rest come from the
+/// defaults tuple, which CPython aligns to the *tail* of the parameter list.
+/// Returns the first slot to fill, the first default index to read, and how
+/// many slots remain, or `None` when the call is not exactly a defaulted
+/// positional call (nothing left to fill, a required parameter missing, or no
+/// defaults at all).
+fn default_fill_plan(
+    arg_count: usize,
+    default_count: usize,
+    pos_filled: usize,
+) -> Option<(usize, usize, usize)> {
+    if default_count == 0 {
+        return None;
+    }
+    let n_required = arg_count.checked_sub(default_count)?;
+    if pos_filled < n_required || pos_filled >= arg_count {
+        return None;
+    }
+    Some((pos_filled, pos_filled - n_required, arg_count - pos_filled))
+}
+
+#[cfg(test)]
+mod default_plan_tests {
+    use super::default_fill_plan;
+
+    /// `def f(a, b=1, c=2)` -- three parameters, two defaults.
+    const ABC2: (usize, usize) = (3, 2);
+
+    #[test]
+    fn fills_the_tail_from_the_front_of_the_defaults_tuple() {
+        assert_eq!(default_fill_plan(3, 2, 1), Some((1, 0, 2)));
+        assert_eq!(default_fill_plan(3, 2, 2), Some((2, 1, 1)));
+    }
+
+    #[test]
+    fn refuses_a_call_that_already_filled_everything() {
+        assert_eq!(default_fill_plan(3, 2, 3), None);
+    }
+
+    #[test]
+    fn refuses_a_call_that_leaves_a_required_parameter_out() {
+        // n_required is arg_count - default_count, so filling fewer than that
+        // is CPython's "missing a required positional argument", not a default.
+        assert_eq!(default_fill_plan(ABC2.0, ABC2.1, 0), None);
+        assert_eq!(default_fill_plan(4, 1, 2), None);
+    }
+
+    #[test]
+    fn refuses_a_signature_with_no_defaults() {
+        assert_eq!(default_fill_plan(2, 0, 1), None);
+    }
+
+    #[test]
+    fn handles_every_slot_defaulted() {
+        // def f(a=1, b=2) called as f()
+        assert_eq!(default_fill_plan(2, 2, 0), Some((0, 0, 2)));
+    }
+
+    #[test]
+    fn refuses_more_positional_values_than_parameters() {
+        assert_eq!(default_fill_plan(2, 1, 3), None);
+    }
 }
 
 #[cfg(test)]

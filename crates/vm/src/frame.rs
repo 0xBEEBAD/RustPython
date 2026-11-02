@@ -1270,7 +1270,10 @@ impl InterpreterFrame {
         // Register this snapshot with the frame it was taken of. A detached
         // copy cannot find its own caller once that caller returns, so the
         // caller links it as it unwinds (see FrameColdData::retained_snapshots).
-        self.cold().retained_snapshots.lock().push(frame_ref.clone());
+        self.cold()
+            .retained_snapshots
+            .lock()
+            .push(frame_ref.clone());
 
         frame_ref
     }
@@ -1490,7 +1493,10 @@ impl PyPayload for FrameObject {
 
     #[inline]
     unsafe fn freelist_pop(_payload: &Self) -> Option<NonNull<PyObject>> {
-        FRAME_FREELIST.try_with(|fl| unsafe { fl.pop() }).ok().flatten()
+        FRAME_FREELIST
+            .try_with(|fl| unsafe { fl.pop() })
+            .ok()
+            .flatten()
     }
 }
 
@@ -3190,7 +3196,8 @@ impl ExecutingFrame<'_> {
             // same observable value while avoiding a locked RMW on every
             // single instruction.
             let idx = self.lasti.load(atomic::Ordering::Relaxed) as usize;
-            self.lasti.store((idx + 1) as u32, atomic::Ordering::Relaxed);
+            self.lasti
+                .store((idx + 1) as u32, atomic::Ordering::Relaxed);
 
             let op = self.code.instructions.read_op(idx);
             let arg = arg_state.extend(self.code.instructions.read_arg(idx));
@@ -3206,9 +3213,9 @@ impl ExecutingFrame<'_> {
                 // Skip RESUME: it should not generate user-visible line events.
                 if self.trace_is_set(vm)
                     && !matches!(
-                    op,
-                    Instruction::Resume { .. } | Instruction::InstrumentedResume
-                )
+                        op,
+                        Instruction::Resume { .. } | Instruction::InstrumentedResume
+                    )
                     && let Some((loc, _)) = self.code.locations.get(idx)
                     && loc.line.get() as u32 != self.prev_line.get()
                 {
@@ -3293,10 +3300,8 @@ impl ExecutingFrame<'_> {
             if self.lasti.load(atomic::Ordering::Relaxed) as usize == idx + 1 {
                 let caches = op.cache_entries();
                 if caches > 0 {
-                    self.lasti.store(
-                        (idx + 1 + caches) as u32,
-                        atomic::Ordering::Relaxed,
-                    );
+                    self.lasti
+                        .store((idx + 1 + caches) as u32, atomic::Ordering::Relaxed);
                 }
             }
             match result {
@@ -4620,9 +4625,7 @@ impl ExecutingFrame<'_> {
                         }
                     };
                     if let Some(result) = result {
-                        if let Err(result) =
-                            self.store_result_to_next_local(result, skipped, vm)
-                        {
+                        if let Err(result) = self.store_result_to_next_local(result, skipped, vm) {
                             self.push_value(result);
                             self.update_lasti(|i| *i += skipped as u32);
                         }
@@ -4650,8 +4653,7 @@ impl ExecutingFrame<'_> {
                             bytecode::ComparisonOperator::try_from(cmp_arg)
                                 .unwrap_or(bytecode::ComparisonOperator::Equal)
                                 .into();
-                        let result =
-                            cmp_op.eval_ord(a_int.as_bigint().cmp(&BigInt::from(small)));
+                        let result = cmp_op.eval_ord(a_int.as_bigint().cmp(&BigInt::from(small)));
                         self.pop_value();
                         self.push_value(vm.ctx.new_bool(result).into());
                         self.update_lasti(|i| *i += skipped as u32);
@@ -4758,18 +4760,22 @@ impl ExecutingFrame<'_> {
                 let (idx1, idx2) = oparg.indexes();
                 let fastlocals = self.localsplus.fastlocals();
                 // SAFETY: compiler guarantees both VarNums < nlocals.
-                let x1 = unsafe { fastlocals.get_unchecked(idx1.as_usize()) }.clone().ok_or_else(|| {
-                    vm.new_unbound_local_error(format!(
-                        "local variable '{}' referenced before assignment",
-                        self.code.varnames[idx1.as_usize()]
-                    ))
-                })?;
-                let x2 = unsafe { fastlocals.get_unchecked(idx2.as_usize()) }.clone().ok_or_else(|| {
-                    vm.new_unbound_local_error(format!(
-                        "local variable '{}' referenced before assignment",
-                        self.code.varnames[idx2.as_usize()]
-                    ))
-                })?;
+                let x1 = unsafe { fastlocals.get_unchecked(idx1.as_usize()) }
+                    .clone()
+                    .ok_or_else(|| {
+                        vm.new_unbound_local_error(format!(
+                            "local variable '{}' referenced before assignment",
+                            self.code.varnames[idx1.as_usize()]
+                        ))
+                    })?;
+                let x2 = unsafe { fastlocals.get_unchecked(idx2.as_usize()) }
+                    .clone()
+                    .ok_or_else(|| {
+                        vm.new_unbound_local_error(format!(
+                            "local variable '{}' referenced before assignment",
+                            self.code.varnames[idx2.as_usize()]
+                        ))
+                    })?;
                 self.push_value(x1);
                 self.push_value(x2);
                 Ok(None)
@@ -5297,9 +5303,7 @@ impl ExecutingFrame<'_> {
                 };
                 let exc_class = exc.class();
                 let unitted = !crate::perf_debug::ablated(crate::perf_debug::EXC_FUSE);
-                let result = if let Some(tuple_of_exceptions) =
-                    exc_type.downcast_ref::<PyTuple>()
-                {
+                let result = if let Some(tuple_of_exceptions) = exc_type.downcast_ref::<PyTuple>() {
                     // CPython validates every element before it matches any.
                     for exception in tuple_of_exceptions {
                         if catch_class(exception, base).is_none() {
@@ -5834,9 +5838,7 @@ impl ExecutingFrame<'_> {
                     // Single-threaded: lock-elided hint check, then raw probe.
                     if vm.state.thread_count.load() == 0 {
                         // SAFETY: no other thread can touch this dict.
-                        if let Some(value) =
-                            dict.get_hint_single_thread(attr_name, hint, vm)
-                        {
+                        if let Some(value) = dict.get_hint_single_thread(attr_name, hint, vm) {
                             self.pop_value();
                             if oparg.is_method() {
                                 self.push_value(value);
@@ -5848,9 +5850,7 @@ impl ExecutingFrame<'_> {
                         }
                         // Hint miss — full raw probe (no hint refresh; the
                         // standard path will re-specialize with a fresh hint).
-                        if let Some(result) =
-                            dict.get_item_single_thread(attr_name, vm)
-                        {
+                        if let Some(result) = dict.get_item_single_thread(attr_name, vm) {
                             if let Some(value) = result? {
                                 self.pop_value();
                                 if oparg.is_method() {
@@ -5868,10 +5868,9 @@ impl ExecutingFrame<'_> {
                     {
                         if let Some(new_hint) = refreshed {
                             unsafe {
-                                self.code.instructions.write_cache_u16(
-                                    cache_base + 3,
-                                    new_hint,
-                                );
+                                self.code
+                                    .instructions
+                                    .write_cache_u16(cache_base + 3, new_hint);
                             }
                         }
                         self.pop_value();
@@ -6188,9 +6187,9 @@ impl ExecutingFrame<'_> {
                         };
                         if let Some(i) = i
                             && unsafe { list.set_raw(i, value.clone()) }
-                            {
-                                return Ok(None);
-                            }
+                        {
+                            return Ok(None);
+                        }
                     } else {
                         let mut vec = list.borrow_vec_mut();
                         let i = if si >= 0 {
@@ -6201,10 +6200,10 @@ impl ExecutingFrame<'_> {
                         };
                         if let Some(i) = i
                             && i < vec.len()
-                            {
-                                vec[i] = value.clone();
-                                return Ok(None);
-                            }
+                        {
+                            vec[i] = value.clone();
+                            return Ok(None);
+                        }
                     }
                 }
                 obj.set_item(&*idx, value, vm)?;
@@ -6329,24 +6328,24 @@ impl ExecutingFrame<'_> {
                         let len = unsafe { list.len_raw() };
                         if let Some(i) = resolve(len)
                             && let Some(value) = (unsafe { list.get_raw(i) })
-                            {
-                                self.pop_stackref();
-                                self.pop_stackref();
-                                self.push_value(value);
-                                return Ok(None);
-                            }
+                        {
+                            self.pop_stackref();
+                            self.pop_stackref();
+                            self.push_value(value);
+                            return Ok(None);
+                        }
                     } else {
                         let vec = list.borrow_vec();
                         if let Some(i) = resolve(vec.len())
                             && i < vec.len()
-                            {
-                                let value = vec.do_get(i);
-                                drop(vec);
-                                self.pop_stackref();
-                                self.pop_stackref();
-                                self.push_value(value);
-                                return Ok(None);
-                            }
+                        {
+                            let value = vec.do_get(i);
+                            drop(vec);
+                            self.pop_stackref();
+                            self.pop_stackref();
+                            self.push_value(value);
+                            return Ok(None);
+                        }
                     }
                 }
                 self.execute_bin_op(vm, bytecode::BinaryOperator::Subscr)
@@ -6521,7 +6520,11 @@ impl ExecutingFrame<'_> {
                     let callable = self.pop_value();
                     let func = callable.downcast_ref_if_exact::<PyFunction>(vm).unwrap();
                     let result = func.invoke_exact_args_slots(args, vm)?;
-                    self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
+                    self.push_value_or_discard(
+                        result,
+                        Instruction::from(Opcode::Call).cache_entries(),
+                        vm,
+                    );
                     Ok(None)
                 } else {
                     self.execute_call_vectorcall(nargs, vm)
@@ -6555,8 +6558,7 @@ impl ExecutingFrame<'_> {
                                 if cached_version == 0
                                     || func.func_version() != cached_version
                                     || !func.has_exact_argcount(nargs + 1)
-                                    || !self
-                                        .specialization_has_datastack_space_for_func(vm, func)
+                                    || !self.specialization_has_datastack_space_for_func(vm, func)
                                     || self.specialization_call_recursion_guard(vm)
                                 {
                                     return None;
@@ -6593,7 +6595,11 @@ impl ExecutingFrame<'_> {
                         self.pop_value(); // callable (bound method)
                         args[0] = Some(bound_self);
                         let result = func.invoke_exact_args_slots(args, vm)?;
-                        self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
+                        self.push_value_or_discard(
+                            result,
+                            Instruction::from(Opcode::Call).cache_entries(),
+                            vm,
+                        );
                         return Ok(None);
                     }
                 }
@@ -6748,8 +6754,7 @@ impl ExecutingFrame<'_> {
                         // self_or_null (if any). One spare slot is reserved so
                         // a bound native method can prepend its `self` in
                         // place (see vectorcall_native_function).
-                        let mut args_vec =
-                            Vec::with_capacity(effective_nargs as usize + 1);
+                        let mut args_vec = Vec::with_capacity(effective_nargs as usize + 1);
                         args_vec.extend(self.pop_multiple(nargs_usize));
                         let self_or_null = self.pop_value_opt();
                         let callable = self.pop_value();
@@ -6758,7 +6763,11 @@ impl ExecutingFrame<'_> {
                         }
                         let result =
                             callable.vectorcall(args_vec, effective_nargs as usize, None, vm)?;
-                        self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
+                        self.push_value_or_discard(
+                            result,
+                            Instruction::from(Opcode::Call).cache_entries(),
+                            vm,
+                        );
                         return Ok(None);
                     }
                 }
@@ -6814,8 +6823,7 @@ impl ExecutingFrame<'_> {
                         // self_or_null (if any). One spare slot is reserved so
                         // a bound native method can prepend its `self` in
                         // place (see vectorcall_native_function).
-                        let mut args_vec =
-                            Vec::with_capacity(effective_nargs as usize + 1);
+                        let mut args_vec = Vec::with_capacity(effective_nargs as usize + 1);
                         args_vec.extend(self.pop_multiple(nargs_usize));
                         let self_or_null = self.pop_value_opt();
                         let callable = self.pop_value();
@@ -6824,47 +6832,32 @@ impl ExecutingFrame<'_> {
                         }
                         let result =
                             callable.vectorcall(args_vec, effective_nargs as usize, None, vm)?;
-                        self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
+                        self.push_value_or_discard(
+                            result,
+                            Instruction::from(Opcode::Call).cache_entries(),
+                            vm,
+                        );
                         return Ok(None);
                     }
                 }
                 self.execute_call_vectorcall(nargs, vm)
             }
             Instruction::CallPyGeneral => {
-                let instr_idx = self.lasti() as usize - 1;
-                let cache_base = instr_idx + 1;
-                let cached_version = self.code.instructions.read_cache_u32(cache_base + 1);
+                // This arm exists to stop the site re-running the adaptive
+                // classifier on a Python function whose arity the call does not
+                // match, which is every call that needs defaults. Binding the
+                // arguments was never its own work to do: it used to collect the
+                // positional arguments into an owned `Vec` and hand that to
+                // `vectorcall_function`, so the shape that always lands here paid
+                // a heap block per call. Measured, that made a one-argument
+                // defaulted call ~40 ns dearer than the same call with all
+                // arguments given, where CPython's difference between the two
+                // shapes is under 2 ns. The dispatch below binds both shapes from
+                // a stack buffer, and re-reads the callable from the stack, so a
+                // site whose callee changed since it was specialized still calls
+                // the function that is actually there.
                 let nargs: u32 = arg.into();
-                if self.specialization_eval_frame_active(vm) {
-                    return self.execute_call_vectorcall(nargs, vm);
-                }
-                let callable = self.nth_value(nargs + 1);
-                if let Some(func) = callable.downcast_ref_if_exact::<PyFunction>(vm)
-                    && func.func_version() == cached_version
-                    && cached_version != 0
-                {
-                    if self.specialization_call_recursion_guard(vm) {
-                        return self.execute_call_vectorcall(nargs, vm);
-                    }
-                    let nargs_usize = nargs as usize;
-                    let pos_args: Vec<PyObjectRef> = self.pop_multiple(nargs_usize).collect();
-                    let self_or_null = self.pop_value_opt();
-                    let callable = self.pop_value();
-                    let (args_vec, effective_nargs) = if let Some(self_val) = self_or_null {
-                        let mut v = Vec::with_capacity(nargs_usize + 1);
-                        v.push(self_val);
-                        v.extend(pos_args);
-                        (v, nargs_usize + 1)
-                    } else {
-                        (pos_args, nargs_usize)
-                    };
-                    let result =
-                        vectorcall_function(&callable, args_vec, effective_nargs, None, vm)?;
-                    self.push_value(result);
-                    Ok(None)
-                } else {
-                    self.execute_call_vectorcall(nargs, vm)
-                }
+                self.execute_call_vectorcall(nargs, vm)
             }
             Instruction::CallBoundMethodGeneral => {
                 let instr_idx = self.lasti() as usize - 1;
@@ -6906,7 +6899,11 @@ impl ExecutingFrame<'_> {
                             None,
                             vm,
                         )?;
-                        self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
+                        self.push_value_or_discard(
+                            result,
+                            Instruction::from(Opcode::Call).cache_entries(),
+                            vm,
+                        );
                         return Ok(None);
                     }
                 }
@@ -7043,12 +7040,15 @@ impl ExecutingFrame<'_> {
                             args: all_args,
                             ..Default::default()
                         };
-                        let result = crate::utils::with_call_context(
-                            Some(&callable_obj),
-                            1,
-                            || func(vm, args),
-                        )?;
-                        self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
+                        let result =
+                            crate::utils::with_call_context(Some(&callable_obj), 1, || {
+                                func(vm, args)
+                            })?;
+                        self.push_value_or_discard(
+                            result,
+                            Instruction::from(Opcode::Call).cache_entries(),
+                            vm,
+                        );
                         return Ok(None);
                     }
                 }
@@ -7162,12 +7162,15 @@ impl ExecutingFrame<'_> {
                             args: all_args,
                             ..Default::default()
                         };
-                        let result = crate::utils::with_call_context(
-                            Some(&callable_obj),
-                            1,
-                            || func(vm, args),
-                        )?;
-                        self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
+                        let result =
+                            crate::utils::with_call_context(Some(&callable_obj), 1, || {
+                                func(vm, args)
+                            })?;
+                        self.push_value_or_discard(
+                            result,
+                            Instruction::from(Opcode::Call).cache_entries(),
+                            vm,
+                        );
                         return Ok(None);
                     }
                 }
@@ -7220,12 +7223,13 @@ impl ExecutingFrame<'_> {
                         args: all_args,
                         ..Default::default()
                     };
-                    let result = crate::utils::with_call_context(
-                        Some(&callable_obj),
-                        1,
-                        || func(vm, args),
-                    )?;
-                    self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
+                    let result =
+                        crate::utils::with_call_context(Some(&callable_obj), 1, || func(vm, args))?;
+                    self.push_value_or_discard(
+                        result,
+                        Instruction::from(Opcode::Call).cache_entries(),
+                        vm,
+                    );
                     return Ok(None);
                 }
                 self.execute_call_vectorcall(nargs, vm)
@@ -7258,7 +7262,11 @@ impl ExecutingFrame<'_> {
                         None,
                         vm,
                     )?;
-                    self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
+                    self.push_value_or_discard(
+                        result,
+                        Instruction::from(Opcode::Call).cache_entries(),
+                        vm,
+                    );
                     return Ok(None);
                 }
                 self.execute_call_vectorcall(nargs, vm)
@@ -7329,7 +7337,11 @@ impl ExecutingFrame<'_> {
                     let _null = self.pop_value_opt(); // self_or_null (None)
                     let _callable = self.pop_value(); // callable (type)
                     let result = self.specialization_run_init(new_obj, &init_func, args, vm)?;
-                    self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
+                    self.push_value_or_discard(
+                        result,
+                        Instruction::from(Opcode::Call).cache_entries(),
+                        vm,
+                    );
                     return Ok(None);
                 }
                 self.execute_call_vectorcall(nargs, vm)
@@ -7382,12 +7394,13 @@ impl ExecutingFrame<'_> {
                         args: all_args,
                         ..Default::default()
                     };
-                    let result = crate::utils::with_call_context(
-                        Some(&callable_obj),
-                        1,
-                        || func(vm, args),
-                    )?;
-                    self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
+                    let result =
+                        crate::utils::with_call_context(Some(&callable_obj), 1, || func(vm, args))?;
+                    self.push_value_or_discard(
+                        result,
+                        Instruction::from(Opcode::Call).cache_entries(),
+                        vm,
+                    );
                     return Ok(None);
                 }
                 self.execute_call_vectorcall(nargs, vm)
@@ -7415,8 +7428,7 @@ impl ExecutingFrame<'_> {
                         // self_or_null (if any). One spare slot is reserved so
                         // a bound native method can prepend its `self` in
                         // place (see vectorcall_native_function).
-                        let mut args_vec =
-                            Vec::with_capacity(effective_nargs as usize + 1);
+                        let mut args_vec = Vec::with_capacity(effective_nargs as usize + 1);
                         args_vec.extend(self.pop_multiple(nargs_usize));
                         let self_or_null = self.pop_value_opt();
                         let callable = self.pop_value();
@@ -7425,7 +7437,11 @@ impl ExecutingFrame<'_> {
                         }
                         let result =
                             callable.vectorcall(args_vec, effective_nargs as usize, None, vm)?;
-                        self.push_value_or_discard(result, Instruction::from(Opcode::Call).cache_entries(), vm);
+                        self.push_value_or_discard(
+                            result,
+                            Instruction::from(Opcode::Call).cache_entries(),
+                            vm,
+                        );
                         return Ok(None);
                     }
                 }
@@ -8077,7 +8093,11 @@ impl ExecutingFrame<'_> {
                         list_iter.fast_next()
                     };
                     if let Some(value) = value {
-                        if let Err(value) = self.store_result_to_next_local(value, Instruction::from(Opcode::ForIter).cache_entries(), vm) {
+                        if let Err(value) = self.store_result_to_next_local(
+                            value,
+                            Instruction::from(Opcode::ForIter).cache_entries(),
+                            vm,
+                        ) {
                             self.push_value(value);
                         }
                     } else {
@@ -8100,7 +8120,11 @@ impl ExecutingFrame<'_> {
                         tuple_iter.fast_next()
                     };
                     if let Some(value) = value {
-                        if let Err(value) = self.store_result_to_next_local(value, Instruction::from(Opcode::ForIter).cache_entries(), vm) {
+                        if let Err(value) = self.store_result_to_next_local(
+                            value,
+                            Instruction::from(Opcode::ForIter).cache_entries(),
+                            vm,
+                        ) {
                             self.push_value(value);
                         }
                     } else {
@@ -8126,7 +8150,11 @@ impl ExecutingFrame<'_> {
                     }
                     match generator.as_coro().send_none(iter, vm) {
                         Ok(PyIterReturn::Return(value)) => {
-                            if let Err(value) = self.store_result_to_next_local(value, Instruction::from(Opcode::ForIter).cache_entries(), vm) {
+                            if let Err(value) = self.store_result_to_next_local(
+                                value,
+                                Instruction::from(Opcode::ForIter).cache_entries(),
+                                vm,
+                            ) {
                                 self.push_value(value);
                             }
                         }
@@ -9019,7 +9047,11 @@ impl ExecutingFrame<'_> {
                 }
             })?
         };
-        Ok(FuncArgs { args, kwargs, has_nonexact_str_keys })
+        Ok(FuncArgs {
+            args,
+            kwargs,
+            has_nonexact_str_keys,
+        })
     }
 
     /// Returns a display string for a callable object for use in error messages.
@@ -9089,41 +9121,33 @@ impl ExecutingFrame<'_> {
 
         // Whether the callee carries a `self` slot decides the argument count,
         // so read it from the borrowed stack slot instead of taking it.
-        let has_self = self
-            .localsplus
-            .stack_index(self_or_null_idx)
-            .is_some();
+        let has_self = self.localsplus.stack_index(self_or_null_idx).is_some();
         let effective_nargs = nargs_usize + usize::from(has_self);
 
-        // Fast path: a simple Python function invoked with the exact number of
-        // positional arguments is by far the most common call shape. Build the
-        // arguments in a stack buffer and prepare the callee frame directly,
-        // skipping both the per-call `Vec` allocation and the generic
+        // Fast path: a simple Python function is by far the most common callee,
+        // and both shapes this can answer -- the exact argument count, and a
+        // call that leaves its tail to `__defaults__` -- write straight into the
+        // callee's fastlocals. The test below only asks whether the callable is
+        // a plain Python function whose arguments fit the stack buffer; which
+        // route the call takes is decided once the values are staged, because
+        // the defaults answer needs the function's own arity and defaults tuple.
+        // Both routes skip the per-call `Vec` allocation and the generic
         // vectorcall dispatch (to_callable / call_context / with_call_context).
-        // This mirrors vectorcall_function's own fast path exactly; the slow
-        // path there (kwargs, *args, generators, mismatched arity) and every
-        // non-Python callable still go through the generic vectorcall below.
         //
         // The shape is tested on the borrowed callable *before* any argument
         // storage is built. Every other callable has to reach a heap vector
         // anyway (`FuncArgs` owns one), so giving it a stack buffer first and
         // then copying out of it is pure loss.
         const FAST_ARGS: usize = 8;
-        let python_call_fast = if !vm.use_tracing.get() && effective_nargs <= FAST_ARGS {
+        let python_call_shape = if !vm.use_tracing.get() && effective_nargs <= FAST_ARGS {
             self.nth_value((nargs_usize + 1) as u32)
                 .downcast_ref_if_exact::<PyFunction>(vm)
-                .is_some_and(|func| {
-                    // Generators stay out of this path: they must produce a
-                    // generator object, not run the body, and that routing is a
-                    // separate hypothesis from the frameless call itself.
-                    !func.is_generator_like()
-                        && func.has_simple_exact_args(effective_nargs as u32)
-                })
+                .is_some()
         } else {
             false
         };
 
-        if python_call_fast {
+        if python_call_shape {
             // One pass: drain self (if any) and the positional args into the
             // stack buffer, then take the callable itself.
             let mut buf: [Option<PyObjectRef>; FAST_ARGS] = [const { None }; FAST_ARGS];
@@ -9166,16 +9190,36 @@ impl ExecutingFrame<'_> {
             // clones and two refcount pairs per call. Ablating it keeps both
             // routes in one binary and one profile, so a measured difference is
             // the route and not the code layout.
-            let result = if crate::perf_debug::ablated(crate::perf_debug::FRAMELESS) {
-                let frame = func.prepare_exact_args_frame(
-                    buf[..effective_nargs].iter_mut().map(|o| o.take().unwrap()),
-                    vm,
-                );
-                let result = vm.run_frame(frame.clone());
-                crate::frame::release_datastack_frame(&frame, vm);
+            let result = if !func.is_generator_like()
+                && func.has_simple_exact_args(effective_nargs as u32)
+            {
+                if crate::perf_debug::ablated(crate::perf_debug::FRAMELESS) {
+                    let frame = func.prepare_exact_args_frame(
+                        buf[..effective_nargs].iter_mut().map(|o| o.take().unwrap()),
+                        vm,
+                    );
+                    let result = vm.run_frame(frame.clone());
+                    crate::frame::release_datastack_frame(&frame, vm);
+                    result
+                } else {
+                    func.invoke_exact_args_slots(&mut buf[..effective_nargs], vm)
+                }
+            } else if let Some(result) =
+                func.invoke_positional_defaults(&mut buf, effective_nargs, vm)
+            {
+                // The values this writes past `effective_nargs` come from
+                // `__defaults__`; the plan already proved the call leaves no
+                // required parameter out, so the fastlocals run can start.
                 result
             } else {
-                func.invoke_exact_args_slots(&mut buf[..effective_nargs], vm)
+                // Neither route answers this call (*args, **kwargs, keyword-only
+                // parameters, a generator, too few or too many values): hand the
+                // staged values to the vectorcall slot exactly as before.
+                let args_vec: Vec<PyObjectRef> = buf[..effective_nargs]
+                    .iter_mut()
+                    .map(|slot| slot.take().expect("staged argument"))
+                    .collect();
+                callable_obj.vectorcall(args_vec, effective_nargs, None, vm)
             };
             self.push_value(result?);
             return Ok(None);
@@ -9244,10 +9288,7 @@ impl ExecutingFrame<'_> {
             .expect("CALL_KW: kw_count exceeds nargs");
         // Whether the callee carries a `self` slot decides the argument count,
         // so read it from the borrowed stack slot instead of taking it.
-        let has_self = self
-            .localsplus
-            .stack_index(self_or_null_idx)
-            .is_some();
+        let has_self = self.localsplus.stack_index(self_or_null_idx).is_some();
 
         // Fast path: a simple Python function whose keyword call fills every
         // parameter exactly once. Each value goes straight to its parameter's
@@ -9258,21 +9299,20 @@ impl ExecutingFrame<'_> {
         // generic vectorcall below with the stack exactly as it was.
         const FAST_KW: usize = crate::builtins::function::FAST_KW_ARGS;
         let mut kw_slots = [0usize; FAST_KW];
-        let total = if !vm.use_tracing.get()
-            && !crate::perf_debug::ablated(crate::perf_debug::KW_FAST)
-        {
-            self.nth_value((nargs_usize + 1) as u32)
-                .downcast_ref_if_exact::<PyFunction>(vm)
-                .and_then(|func| {
-                    func.kwarg_scatter(
-                        kwarg_names_tuple.as_slice(),
-                        pos_count + usize::from(has_self),
-                        &mut kw_slots,
-                    )
-                })
-        } else {
-            None
-        };
+        let total =
+            if !vm.use_tracing.get() && !crate::perf_debug::ablated(crate::perf_debug::KW_FAST) {
+                self.nth_value((nargs_usize + 1) as u32)
+                    .downcast_ref_if_exact::<PyFunction>(vm)
+                    .and_then(|func| {
+                        func.kwarg_scatter(
+                            kwarg_names_tuple.as_slice(),
+                            pos_count + usize::from(has_self),
+                            &mut kw_slots,
+                        )
+                    })
+            } else {
+                None
+            };
 
         if let Some(total) = total {
             let mut buf: [Option<PyObjectRef>; FAST_KW] = [const { None }; FAST_KW];
@@ -9714,10 +9754,12 @@ impl ExecutingFrame<'_> {
         // Exact-type fast paths run on borrowed stack refs: they never call user
         // code, so the operands cannot be deallocated underneath them and the
         // two promote/drop refcount pairs per operand are avoided.
-        if let Some(value) =
-            Self::bin_op_exact_fast(a_ref.as_object(), b_ref.as_object(), op, vm)
-        {
-            self.push_value_or_discard(value, Instruction::from(Opcode::BinaryOp).cache_entries(), vm);
+        if let Some(value) = Self::bin_op_exact_fast(a_ref.as_object(), b_ref.as_object(), op, vm) {
+            self.push_value_or_discard(
+                value,
+                Instruction::from(Opcode::BinaryOp).cache_entries(),
+                vm,
+            );
             return Ok(None);
         }
 
@@ -9758,7 +9800,11 @@ impl ExecutingFrame<'_> {
             bytecode::BinaryOperator::Subscr => a_ref.get_item(b_ref.as_object(), vm),
         }?;
 
-        self.push_value_or_discard(value, Instruction::from(Opcode::BinaryOp).cache_entries(), vm);
+        self.push_value_or_discard(
+            value,
+            Instruction::from(Opcode::BinaryOp).cache_entries(),
+            vm,
+        );
         Ok(None)
     }
 
@@ -10393,9 +10439,8 @@ impl ExecutingFrame<'_> {
         // unregistered CPython-layout objects.
         let raw = obj.as_object().as_raw();
         let needs_slow = crate::object::foreign_dispatch::is_foreign(raw)
-            || crate::object::foreign_dispatch::materialize_cpy_type_fn().is_some_and(|m| {
-                unsafe { !m(raw as *mut _).is_null() }
-            });
+            || crate::object::foreign_dispatch::materialize_cpy_type_fn()
+                .is_some_and(|m| unsafe { !m(raw as *mut _).is_null() });
         if needs_slow {
             unsafe {
                 self.code.instructions.write_adaptive_counter(
@@ -11709,11 +11754,8 @@ impl ExecutingFrame<'_> {
                     if nargs == 0
                         && !crate::perf_debug::ablated(crate::perf_debug::CLASS_CALL)
                         && let Some(init) = cls.get_attr(identifier!(vm, __init__))
-                        && let Some(object_init) = vm
-                            .ctx
-                            .types
-                            .object_type
-                            .get_attr(identifier!(vm, __init__))
+                        && let Some(object_init) =
+                            vm.ctx.types.object_type.get_attr(identifier!(vm, __init__))
                         && init.is(&object_init)
                         && !type_has_abstract_methods(cls, vm)
                     {
@@ -12314,10 +12356,9 @@ impl ExecutingFrame<'_> {
                 self.code
                     .instructions
                     .write_cache_u16(cache_base + 1, globals_version);
-                self.code.instructions.write_cache_u16(
-                    cache_base + 2,
-                    builtins_dict.version() as u16,
-                );
+                self.code
+                    .instructions
+                    .write_cache_u16(cache_base + 2, builtins_dict.version() as u16);
                 self.code.instructions.write_cache_u16(cache_base + 3, hint);
             }
         }
@@ -12738,7 +12779,8 @@ impl ExecutingFrame<'_> {
         // SAFETY: bytecode compiler guarantees var_num < nlocals.
         let slot = unsafe { self.localsplus.fastlocals_mut().get_unchecked_mut(var_num) };
         *slot = Some(value);
-        self.lasti.store(next_lasti as u32, atomic::Ordering::Relaxed);
+        self.lasti
+            .store(next_lasti as u32, atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -12748,7 +12790,11 @@ impl ExecutingFrame<'_> {
     /// instruction boundaries. One place decides, so the producer paths cannot
     /// disagree about when the fusion applies.
     #[inline]
-    fn fused_store_target(&self, cache_units: usize, vm: &VirtualMachine) -> Option<(usize, usize)> {
+    fn fused_store_target(
+        &self,
+        cache_units: usize,
+        vm: &VirtualMachine,
+    ) -> Option<(usize, usize)> {
         if vm.use_tracing.get() || vm.state.monitoring_events.load() != 0 {
             return None;
         }
@@ -12758,9 +12804,7 @@ impl ExecutingFrame<'_> {
         // instruction's own byte (an EXTENDED_ARG would have been a separate
         // instruction in between), and StoreFast is never quickened.
         match unit.op {
-            Instruction::StoreFast { .. } => {
-                Some((usize::from(u8::from(unit.arg)), next_idx + 1))
-            }
+            Instruction::StoreFast { .. } => Some((usize::from(u8::from(unit.arg)), next_idx + 1)),
             _ => None,
         }
     }
@@ -12798,7 +12842,8 @@ impl ExecutingFrame<'_> {
         if !iter.apply_reuse(obj, previous, step, vm) {
             return false;
         }
-        self.lasti.store(next_lasti as u32, atomic::Ordering::Relaxed);
+        self.lasti
+            .store(next_lasti as u32, atomic::Ordering::Relaxed);
         true
     }
 
