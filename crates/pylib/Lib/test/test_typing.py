@@ -8264,7 +8264,6 @@ class NamedTupleTests(BaseTestCase):
                 self.assertEqual(struct.__annotations__, {})
                 self.assertIsInstance(struct(), struct)
 
-    @unittest.expectedFailure  # TODO: RUSTPYTHON; positional-only args passed as keywords raise "got an unexpected keyword argument" instead of CPython's "got some positional-only arguments passed as keyword arguments" (VM call-binding wording, not a typing.py issue: `def f(a, b, /)` called as `f(a=1)` differs the same way)
     def test_namedtuple_errors(self):
         with self.assertRaises(TypeError):
             NamedTuple.__new__()
