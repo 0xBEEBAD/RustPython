@@ -1398,7 +1398,7 @@ impl SymbolTableBuilder {
         if table.symbols.contains_key(parameter.name.as_str()) {
             return Err(SymbolTableError {
                 error: format!(
-                    "duplicate argument '{}' in function definition",
+                    "duplicate parameter '{}' in function definition",
                     parameter.name
                 ),
                 location: Some(
@@ -3200,7 +3200,7 @@ impl SymbolTableBuilder {
             ) && flags.contains(SymbolFlags::DEF_PARAM)
             {
                 return Err(SymbolTableError {
-                    error: format!("duplicate argument '{original_name}' in function definition"),
+                    error: format!("duplicate parameter '{original_name}' in function definition"),
                     location,
                 });
             }
@@ -3478,7 +3478,7 @@ mod tests {
 
         assert_eq!(
             err.error,
-            "duplicate argument '_C__x' in function definition"
+            "duplicate parameter '_C__x' in function definition"
         );
     }
 
