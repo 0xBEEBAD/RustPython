@@ -26,8 +26,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../../Lib/importlib/_bootstrap.py");
     track_git_metadata();
 
-    // = 3.14.0alpha
-    python_version(3, 14, 0, "alpha", 0);
+    // = 3.15.2 final
+    python_version(3, 15, 2, "final", 0);
 
     println!("cargo:rustc-env=RUSTPYTHON_GIT_HASH={}", git_hash());
     println!(
@@ -196,7 +196,13 @@ fn python_version(major: usize, minor: usize, micro: usize, release: &str, seria
 
     println!("cargo:rustc-env=WINVER_CPY={major}.{minor}",);
 
-    let cpy_version = format!("{major}.{minor}.{micro}.{release}");
+    // CPython spells a final release as "3.15.2"; only pre-releases carry the
+    // level, and platform.py parses this string for python_version().
+    let cpy_version = if release == "final" {
+        format!("{major}.{minor}.{micro}")
+    } else {
+        format!("{major}.{minor}.{micro}.{release}")
+    };
 
     let (left, right) = get_version(&cpy_version);
     println!("cargo:rustc-env=RUSTPYTHON_VERSION_LEFT={left}");
@@ -236,7 +242,7 @@ fn release_to_n(release: &str) -> usize {
         "alpha" => 0xA,
         "beta" => 0xB,
         "candidate" => 0xC,
-        "final" => 0xD,
+        "final" => 0xF,
         _ => panic!("`release` must be one of: 'alpha', 'beta', 'candidate', 'final'"),
     }
 }

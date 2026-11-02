@@ -30,8 +30,13 @@ pub const WINVER: &str = env!("WINVER_CPY");
 /// named "<module>.<SOABI>.pyd" and pip derives the wheel ABI tag from this
 /// string, so it must stay in sync with `_imp.extension_suffixes()` and
 /// sysconfig's EXT_SUFFIX.
+///
+/// This one lags the reported language version on purpose: the tag names the ABI
+/// this checkout can load, and the prebuilt test extensions plus the import
+/// library shim are cp314. Bump it together with `bench/build_test_extensions.ps1`
+/// and `bench/make_python_dll_shims.ps1`, not with `python_version()`.
 #[cfg(windows)]
-pub const SOABI: &str = concat!("cp", env!("MAJOR_CPY"), env!("MINOR_CPY"), "-win_amd64");
+pub const SOABI: &str = "cp314-win_amd64";
 
 pub const GIT_REVISION: &str = env!("RUSTPYTHON_GIT_HASH");
 pub const GIT_IDENTIFIER: &str = env!("RUSTPYTHON_GIT_IDENTIFIER");
