@@ -5286,6 +5286,7 @@ impl ExecutingFrame<'_> {
                     )
                 };
                 let exc_class = exc.class();
+                let unitted = !crate::perf_debug::ablated(crate::perf_debug::EXC_FUSE);
                 let result = if let Some(tuple_of_exceptions) =
                     exc_type.downcast_ref::<PyTuple>()
                 {
@@ -5299,10 +5300,42 @@ impl ExecutingFrame<'_> {
                         .iter()
                         .filter_map(|typ| catch_class(typ, base))
                         .any(|typ| exc_class.fast_issubclass(typ))
+                } else if unitted
+                    && exc_type
+                        .downcast_ref::<PyType>()
+                        .is_some_and(|typ| exc_class.as_object().is(typ.as_object()))
+                {
+                    // The clause names the very class of the live exception. One
+                    // pointer compare answers the match, and the answer implies the
+                    // validation: every exception class inherits BaseException, so the
+                    // MRO walk could only agree that this target is catchable.
+                    true
                 } else {
                     let typ = catch_class(&exc_type, base).ok_or_else(invalid)?;
                     exc_class.fast_issubclass(typ)
                 };
+                // The compiler emits a clause's test and its branch as the pair
+                // `CHECK_EXC_MATCH; POP_JUMP_IF_FALSE`, so decide the branch here
+                // instead of materializing a bool, re-dispatching and reading it back.
+                // `lasti` already sits on the jump's own unit, and the jump resolves
+                // its target from `lasti + caches + delta`, which is what both arms
+                // below reproduce. Tracing, an instruction-boundary observer, an
+                // EXTENDED_ARG in front of the jump or any other variant of the next
+                // unit leaves the pair to run as two instructions.
+                if unitted
+                    && !vm.use_tracing.get()
+                    && vm.state.monitoring_events.load() == 0
+                    && let Some(unit) = self.code.instructions.get(self.lasti() as usize)
+                    && matches!(unit.op, Instruction::PopJumpIfFalse { .. })
+                {
+                    if result {
+                        // Past the jump unit and its one cache entry.
+                        self.update_lasti(|i| *i += 2);
+                    } else {
+                        self.jump_relative_forward(u32::from(u8::from(unit.arg)), 2);
+                    }
+                    return Ok(None);
+                }
                 self.push_value(vm.ctx.new_bool(result).into());
                 Ok(None)
             }
