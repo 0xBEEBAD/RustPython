@@ -950,13 +950,15 @@ impl Py<PyFunction> {
     /// `self` of a bound method included. Those values occupy buffer indices
     /// `0..pos_filled` in parameter order, so a parameter's buffer index is its
     /// parameter index and each keyword's destination is `pos_filled + offset`.
+    /// Keyword-only parameters follow the positional ones in the same slot
+    /// range, which makes the window this has to fill one contiguous run.
     ///
     /// Every rejection is deliberate: `*args` and `**kwargs` need their own
-    /// objects, keyword-only parameters live past `co_argcount`, a call that
-    /// leaves a parameter out has to answer it with a default, and a keyword
-    /// naming a positional-only parameter must produce CPython's
-    /// positional-only error -- which is why `pos_filled` may not fall behind
-    /// `co_posonlyargcount`.
+    /// objects, a call that leaves a parameter out has to answer it with a
+    /// default, a generator has to produce its generator object instead of
+    /// running, and a keyword naming a positional-only parameter must produce
+    /// CPython's positional-only error -- which is why `pos_filled` may not
+    /// fall behind `co_posonlyargcount`.
     #[inline]
     pub(crate) fn kwarg_scatter(
         &self,
@@ -966,20 +968,23 @@ impl Py<PyFunction> {
     ) -> Option<usize> {
         let code: &Py<PyCode> = &self.code;
         let arg_count = code.arg_count as usize;
+        let kwonly_count = code.kwonlyarg_count as usize;
+        // The parameters only a keyword can fill: the positional ones the call
+        // did not reach, then every keyword-only one.
+        let window = arg_count.checked_sub(pos_filled)? + kwonly_count;
         if !code.flags.contains(bytecode::CodeFlags::OPTIMIZED)
             || code
                 .flags
                 .intersects(bytecode::CodeFlags::VARARGS | bytecode::CodeFlags::VARKEYWORDS)
-            || code.kwonlyarg_count != 0
-            || pos_filled > arg_count
             || pos_filled < code.posonlyarg_count as usize
-            || arg_count - pos_filled != kwnames.len()
-            || arg_count > slots.len()
+            || window != kwnames.len()
+            || arg_count + kwonly_count > slots.len()
+            || (kwonly_count > 0 && self.is_generator_like())
         {
             return None;
         }
         let bound = kwarg_param_slots(
-            arg_count - pos_filled,
+            window,
             |j| code.varnames[pos_filled + j].as_wtf8(),
             kwnames.len(),
             |i| kw_name_views(kwnames, i),
@@ -989,8 +994,30 @@ impl Py<PyFunction> {
             for slot in slots.iter_mut().take(count) {
                 *slot += pos_filled;
             }
-            arg_count
+            arg_count + kwonly_count
         })
+    }
+
+    /// Run a call whose values are already laid out in parameter order.
+    ///
+    /// `args` covers `co_argcount` slots, plus the keyword-only slots when
+    /// `kwarg_scatter` bound them. The exact-positional route owns generators
+    /// and the measurement ablations; a wider buffer can only come from a
+    /// non-generator shape, so it fills fastlocals directly.
+    #[inline]
+    pub(crate) fn invoke_bound_slots(
+        &self,
+        args: &mut [Option<PyObjectRef>],
+        vm: &VirtualMachine,
+    ) -> PyResult {
+        if args.len() == self.code.arg_count as usize {
+            return self.invoke_exact_args_slots(args, vm);
+        }
+        debug_assert!(!self.is_generator_like());
+        let taken = args
+            .iter_mut()
+            .map(|slot| slot.take().expect("arg slot must be filled"));
+        self.invoke_prepared_exact_args(taken, vm)
     }
 
     /// Create the generator/coroutine for an exact positional-argument call.
@@ -1885,7 +1912,7 @@ pub(crate) fn vectorcall_function(
                 let dst = if i < nargs { i } else { slots[i - nargs] };
                 ordered[dst] = Some(val);
             }
-            return zelf.invoke_exact_args_slots(&mut ordered[..total], vm);
+            return zelf.invoke_bound_slots(&mut ordered[..total], vm);
         }
     }
 

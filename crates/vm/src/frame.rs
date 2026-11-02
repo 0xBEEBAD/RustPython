@@ -9305,7 +9305,7 @@ impl ExecutingFrame<'_> {
             let func = callable_obj
                 .downcast_ref_if_exact::<PyFunction>(vm)
                 .expect("callable slot unchanged since the fast-path test");
-            let result = func.invoke_exact_args_slots(&mut buf[..total], vm);
+            let result = func.invoke_bound_slots(&mut buf[..total], vm);
             self.push_value(result?);
             return Ok(None);
         }
