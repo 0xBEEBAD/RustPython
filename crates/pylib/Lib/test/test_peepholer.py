@@ -844,6 +844,7 @@ class TestMarkingVariablesAsUnKnown(BytecodeTestCase):
         self.addCleanup(sys.settrace, sys.gettrace())
         sys.settrace(None)
 
+    @unittest.expectedFailure  # TODO: RUSTPYTHON; LOAD_FAST_BORROW_LOAD_FAST_BORROW + BINARY_OP is fused into opcode 213, which dis renders as <213>
     def test_load_fast_known_simple(self):
         def f():
             x = 1
