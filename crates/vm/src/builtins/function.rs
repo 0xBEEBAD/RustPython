@@ -351,23 +351,30 @@ impl PyFunction {
                 .map(|(p, _)| p)
         };
 
-        let mut posonly_passed_as_kwarg = Vec::new();
-        // Number of keywords that will hit the "unexpected keyword" error
-        // (matches neither a keyword-accepting parameter nor a positional-only
-        // parameter). CPython only appends a "Did you mean" suggestion when
-        // exactly one unexpected keyword was supplied.
-        let num_unexpected_kwargs = func_args
-            .kwargs
-            .keys()
-            .filter(|name| {
-                let Some(s) = name.as_str().ok() else {
-                    return true;
-                };
-                let is_param = arg_pos(code.posonlyarg_count as usize..total_args, s).is_some();
-                let is_posonly = arg_pos(0..code.posonlyarg_count as usize, s).is_some();
-                !is_param && !is_posonly
-            })
-            .count();
+        // CPython's `positional_only_passed_as_keyword` (ceval.c) scans *every*
+        // keyword against the positional-only parameters and reports the hits
+        // in parameter order. It only runs from the branch where the function
+        // has no `**kwargs`, so a collision outranks the "unexpected keyword
+        // argument" error whatever order the call spelled its keywords in.
+        let posonly_collisions: Vec<&str> = if kwargs.is_none()
+            && code.posonlyarg_count > 0
+            && !func_args.kwargs.is_empty()
+        {
+            let mut hits = Vec::new();
+            for name in &code.varnames[..code.posonlyarg_count as usize] {
+                let param = name.as_str();
+                if func_args
+                    .kwargs
+                    .keys()
+                    .any(|key| key.as_str().is_ok_and(|s| s == param))
+                {
+                    hits.push(param);
+                }
+            }
+            hits
+        } else {
+            Vec::new()
+        };
         // Handle keyword arguments
         for (name, value) in func_args.kwargs {
             // Parameter names are plain identifiers, so a non-UTF-8 (surrogate) key
@@ -388,41 +395,35 @@ impl PyFunction {
                 *slot = Some(value);
             } else if let Some(kwargs) = kwargs.as_ref() {
                 kwargs.set_item(&name, value, vm)?;
-            } else if name_str
-                .is_some_and(|s| arg_pos(0..code.posonlyarg_count as usize, s).is_some())
-            {
-                posonly_passed_as_kwarg.push(name);
             } else {
+                if !posonly_collisions.is_empty() {
+                    return Err(vm.new_type_error(format!(
+                        "{}() got some positional-only arguments passed as keyword arguments: '{}'",
+                        self.__qualname__(),
+                        posonly_collisions.iter().copied().format(", "),
+                    )));
+                }
                 // CPython raises `f() got an unexpected keyword argument
-                // 'X'` with a "Did you mean 'Y'?" suggestion when exactly one
-                // unexpected keyword remains and a close parameter name
-                // exists (Objects/call.c).
+                // 'X'` with a "Did you mean 'Y'?" suggestion whenever a close
+                // parameter name exists (ceval.c `_Py_CalculateSuggestions`);
+                // how many unexpected keywords the call passed is irrelevant.
                 let mut msg = format!(
                     "{}() got an unexpected keyword argument '{}'",
                     self.__qualname__(),
                     name
                 );
-                if num_unexpected_kwargs == 1
-                    && let Some(suggestion) = name_str.and_then(|n| {
-                        crate::utils::suggest_keyword(
-                            n,
-                            code.varnames[code.posonlyarg_count as usize..total_args]
-                                .iter()
-                                .map(|s| s.as_str()),
-                        )
-                    })
-                {
+                if let Some(suggestion) = name_str.and_then(|n| {
+                    crate::utils::suggest_keyword(
+                        n,
+                        code.varnames[code.posonlyarg_count as usize..total_args]
+                            .iter()
+                            .map(|s| s.as_str()),
+                    )
+                }) {
                     msg.push_str(&format!(". Did you mean '{suggestion}'?"));
                 }
                 return Err(vm.new_type_error(msg));
             }
-        }
-        if !posonly_passed_as_kwarg.is_empty() {
-            return Err(vm.new_type_error(format!(
-                "{}() got some positional-only arguments passed as keyword arguments: '{}'",
-                self.__qualname__(),
-                posonly_passed_as_kwarg.into_iter().format(", "),
-            )));
         }
 
         let mut defaults_and_kwdefaults = None;
