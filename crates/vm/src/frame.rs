@@ -6873,7 +6873,17 @@ impl ExecutingFrame<'_> {
                     .stack_index(stack_len - nargs as usize - 1)
                     .is_some();
                 let callable = self.nth_value(nargs + 1);
+                // A bound method call whose arity misses the exact-args kernel
+                // lands here, and it used to pay two heap blocks: the collected
+                // positional arguments and a second vector to prepend `self`.
+                // Both go into one stack buffer instead, and the values reach
+                // the callee's fastlocals through the same defaults binder an
+                // unbound call uses; only a shape it cannot answer builds the
+                // vector. Wide calls skip this arm and take the shared dispatch.
+                const FAST_VECTOR_ARGS: usize = 8;
+                let nargs_usize = nargs as usize;
                 if !self_or_null_is_some
+                    && nargs_usize + 1 <= FAST_VECTOR_ARGS
                     && let Some(bound_method) = callable.downcast_ref_if_exact::<PyBoundMethod>(vm)
                 {
                     let bound_function = bound_method.function_obj().clone();
@@ -6885,20 +6895,34 @@ impl ExecutingFrame<'_> {
                         if self.specialization_call_recursion_guard(vm) {
                             return self.execute_call_vectorcall(nargs, vm);
                         }
-                        let nargs_usize = nargs as usize;
-                        let pos_args: Vec<PyObjectRef> = self.pop_multiple(nargs_usize).collect();
+                        let mut buf: [Option<PyObjectRef>; FAST_VECTOR_ARGS] =
+                            [const { None }; FAST_VECTOR_ARGS];
+                        buf[0] = Some(bound_self);
+                        for (slot, arg) in buf[1..=nargs_usize]
+                            .iter_mut()
+                            .zip(self.pop_multiple(nargs_usize))
+                        {
+                            *slot = Some(arg);
+                        }
                         self.pop_value_opt(); // null (self_or_null)
                         self.pop_value(); // callable (bound method)
-                        let mut args_vec = Vec::with_capacity(nargs_usize + 1);
-                        args_vec.push(bound_self);
-                        args_vec.extend(pos_args);
-                        let result = vectorcall_function(
-                            &bound_function,
-                            args_vec,
-                            nargs_usize + 1,
-                            None,
-                            vm,
-                        )?;
+                        let result = if let Some(result) =
+                            func.invoke_positional_defaults(&mut buf, nargs_usize + 1, vm)
+                        {
+                            result
+                        } else {
+                            let args_vec: Vec<PyObjectRef> = buf[..=nargs_usize]
+                                .iter_mut()
+                                .map(|slot| slot.take().expect("staged argument"))
+                                .collect();
+                            vectorcall_function(
+                                &bound_function,
+                                args_vec,
+                                nargs_usize + 1,
+                                None,
+                                vm,
+                            )
+                        }?;
                         self.push_value_or_discard(
                             result,
                             Instruction::from(Opcode::Call).cache_entries(),
