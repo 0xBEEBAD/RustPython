@@ -9229,23 +9229,98 @@ impl ExecutingFrame<'_> {
         let self_or_null_idx = stack_len - nargs_usize - 1;
         let args_start = stack_len - nargs_usize;
 
-        // Build args: [self?, pos_arg1, ..., pos_argM, kw_val1, ..., kw_valK]
+        let pos_count = nargs_usize
+            .checked_sub(kw_count)
+            .expect("CALL_KW: kw_count exceeds nargs");
+        // Whether the callee carries a `self` slot decides the argument count,
+        // so read it from the borrowed stack slot instead of taking it.
+        let has_self = self
+            .localsplus
+            .stack_index(self_or_null_idx)
+            .is_some();
+
+        // Fast path: a simple Python function whose keyword call fills every
+        // parameter exactly once. Each value goes straight to its parameter's
+        // slot in a stack buffer and the callee is entered the way an exact
+        // positional call is: no argument Vec, no FuncArgs, no keyword map.
+        // The shape is tested on the borrowed callable before any argument
+        // storage is touched, so a call that does not match still reaches the
+        // generic vectorcall below with the stack exactly as it was.
+        const FAST_KW: usize = crate::builtins::function::FAST_KW_ARGS;
+        let mut kw_slots = [0usize; FAST_KW];
+        let total = if !vm.use_tracing.get()
+            && !crate::perf_debug::ablated(crate::perf_debug::KW_FAST)
+        {
+            self.nth_value((nargs_usize + 1) as u32)
+                .downcast_ref_if_exact::<PyFunction>(vm)
+                .and_then(|func| {
+                    func.kwarg_scatter(
+                        kwarg_names_tuple.as_slice(),
+                        pos_count + usize::from(has_self),
+                        &mut kw_slots,
+                    )
+                })
+        } else {
+            None
+        };
+
+        if let Some(total) = total {
+            let mut buf: [Option<PyObjectRef>; FAST_KW] = [const { None }; FAST_KW];
+            if let Some(self_val) = self
+                .localsplus
+                .stack_index_mut(self_or_null_idx)
+                .take()
+                .map(|sr| sr.to_pyobj())
+            {
+                buf[0] = Some(self_val);
+            }
+            for i in 0..nargs_usize {
+                let val = self
+                    .localsplus
+                    .stack_index_mut(args_start + i)
+                    .take()
+                    .unwrap()
+                    .to_pyobj();
+                // The stack holds the explicit positionals first and then the
+                // keyword values; `self` already sits at buffer index 0, which
+                // is parameter 0, so a positional's buffer index is its
+                // parameter index and the scatter's indices are absolute too.
+                let dst = if i < pos_count {
+                    i + usize::from(has_self)
+                } else {
+                    kw_slots[i - pos_count]
+                };
+                buf[dst] = Some(val);
+            }
+            let callable_obj = self
+                .localsplus
+                .stack_index_mut(callable_idx)
+                .take()
+                .unwrap()
+                .to_pyobj();
+            self.localsplus.stack_truncate(callable_idx);
+
+            // The slot was tested as an exact PyFunction one instruction ago
+            // and nothing wrote to it since, so the re-check cannot fail.
+            let func = callable_obj
+                .downcast_ref_if_exact::<PyFunction>(vm)
+                .expect("callable slot unchanged since the fast-path test");
+            let result = func.invoke_exact_args_slots(&mut buf[..total], vm);
+            self.push_value(result?);
+            return Ok(None);
+        }
+
+        // Generic path: build the argument vector the callee's vectorcall slot
+        // expects (one spare slot lets a bound native method prepend its self
+        // in place).
         let self_or_null = self
             .localsplus
             .stack_index_mut(self_or_null_idx)
             .take()
             .map(|sr| sr.to_pyobj());
-        let has_self = self_or_null.is_some();
-
-        let pos_count = nargs_usize
-            .checked_sub(kw_count)
-            .expect("CALL_KW: kw_count exceeds nargs");
         let effective_nargs = if has_self { pos_count + 1 } else { pos_count };
 
-        // Build the full args slice: positional (including self) + kwarg values
-        let total_args = effective_nargs + kw_count;
-        // One spare slot lets a bound native method prepend its self in place.
-        let mut args_vec = Vec::with_capacity(total_args + 1);
+        let mut args_vec = Vec::with_capacity(nargs_usize + 1);
         if let Some(self_val) = self_or_null {
             args_vec.push(self_val);
         }

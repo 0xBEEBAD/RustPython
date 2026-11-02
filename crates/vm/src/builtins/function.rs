@@ -13,7 +13,7 @@ use crate::{
     AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
     bytecode,
     class::PyClassImpl,
-    common::wtf8::{Wtf8Buf, wtf8_concat},
+    common::wtf8::{Wtf8, Wtf8Buf, wtf8_concat},
     frame::{FrameObject, FrameObjectRef},
     function::{Either, FuncArgs, OptionalArg, PyComparisonValue, PySetterValue},
     scope::Scope,
@@ -942,6 +942,57 @@ impl Py<PyFunction> {
             && code.arg_count == nargs
     }
 
+    /// The argument count for a keyword call that can bind straight into
+    /// fastlocals, with the destination index of each keyword written to
+    /// `slots`, or `None` when the call needs the generic binding machinery.
+    ///
+    /// `pos_filled` counts the parameters the call already filled positionally,
+    /// `self` of a bound method included. Those values occupy buffer indices
+    /// `0..pos_filled` in parameter order, so a parameter's buffer index is its
+    /// parameter index and each keyword's destination is `pos_filled + offset`.
+    ///
+    /// Every rejection is deliberate: `*args` and `**kwargs` need their own
+    /// objects, keyword-only parameters live past `co_argcount`, a call that
+    /// leaves a parameter out has to answer it with a default, and a keyword
+    /// naming a positional-only parameter must produce CPython's
+    /// positional-only error -- which is why `pos_filled` may not fall behind
+    /// `co_posonlyargcount`.
+    #[inline]
+    pub(crate) fn kwarg_scatter(
+        &self,
+        kwnames: &[PyObjectRef],
+        pos_filled: usize,
+        slots: &mut [usize],
+    ) -> Option<usize> {
+        let code: &Py<PyCode> = &self.code;
+        let arg_count = code.arg_count as usize;
+        if !code.flags.contains(bytecode::CodeFlags::OPTIMIZED)
+            || code
+                .flags
+                .intersects(bytecode::CodeFlags::VARARGS | bytecode::CodeFlags::VARKEYWORDS)
+            || code.kwonlyarg_count != 0
+            || pos_filled > arg_count
+            || pos_filled < code.posonlyarg_count as usize
+            || arg_count - pos_filled != kwnames.len()
+            || arg_count > slots.len()
+        {
+            return None;
+        }
+        let bound = kwarg_param_slots(
+            arg_count - pos_filled,
+            |j| code.varnames[pos_filled + j].as_wtf8(),
+            kwnames.len(),
+            |i| kw_name_views(kwnames, i),
+            slots,
+        );
+        bound.map(|count| {
+            for slot in slots.iter_mut().take(count) {
+                *slot += pos_filled;
+            }
+            arg_count
+        })
+    }
+
     /// Create the generator/coroutine for an exact positional-argument call.
     ///
     /// Equivalent to `invoke` for a code object with `has_simple_exact_args`
@@ -1816,6 +1867,28 @@ pub(crate) fn vectorcall_function(
         return result;
     }
 
+    // FAST PATH: a keyword call that fills every parameter exactly once. The
+    // values are scattered into parameter order in a stack buffer and the
+    // callee is entered the way an exact positional call is, so the call costs
+    // no FuncArgs, no keyword map and no copy of the keyword names -- which is
+    // what made a single keyword argument cost more than the call around it.
+    // Tracing needs a real frame object, so instrumented runs keep the generic
+    // route below.
+    if let Some(kwnames) = kwnames.filter(|kw| !kw.is_empty())
+        && !vm.use_tracing.get()
+        && !crate::perf_debug::ablated(crate::perf_debug::KW_FAST)
+    {
+        let mut slots = [0usize; FAST_KW_ARGS];
+        if let Some(total) = zelf.kwarg_scatter(kwnames, nargs, &mut slots) {
+            let mut ordered: [Option<PyObjectRef>; FAST_KW_ARGS] = [const { None }; FAST_KW_ARGS];
+            for (i, val) in args.into_iter().take(total).enumerate() {
+                let dst = if i < nargs { i } else { slots[i - nargs] };
+                ordered[dst] = Some(val);
+            }
+            return zelf.invoke_exact_args_slots(&mut ordered[..total], vm);
+        }
+    }
+
     // SLOW PATH: construct FuncArgs from owned Vec and delegate to invoke()
     let func_args = if has_kwargs {
         FuncArgs::from_vectorcall_owned(args, nargs, kwnames)
@@ -1862,4 +1935,149 @@ pub(crate) fn init(context: &'static Context) {
         .store(Some(vectorcall_bound_method));
 
     PyCell::extend_class(context, context.types.cell_type);
+}
+
+/// Largest argument count the call fast paths stage in a stack buffer.
+pub(crate) const FAST_KW_ARGS: usize = 8;
+
+/// Map the `kw_count` keyword names of a call onto the `param_count` parameters
+/// it has not filled positionally yet, writing each destination offset into
+/// `slots`.
+///
+/// `None` means the call cannot be bound that way and must go through the
+/// generic machinery, which is what produces the "unexpected keyword argument",
+/// "multiple values for argument" and positional-only errors.
+fn kwarg_param_slots<'p, 'k>(
+    param_count: usize,
+    param_name: impl Fn(usize) -> &'p Wtf8,
+    kw_count: usize,
+    kw_name: impl Fn(usize) -> &'k Wtf8,
+    slots: &mut [usize],
+) -> Option<usize> {
+    // Only a call that fills every remaining parameter exactly once can be
+    // bound this way: a parameter left out has to be answered with its default
+    // and a surplus keyword is an error, both owned by the generic path. The
+    // destinations are staged in a stack buffer, so a wider call goes generic
+    // too.
+    if param_count != kw_count || kw_count > slots.len() {
+        return None;
+    }
+    for i in 0..kw_count {
+        let name = kw_name(i);
+        let mut target = None;
+        for j in 0..param_count {
+            if name == param_name(j) {
+                target = Some(j);
+                break;
+            }
+        }
+        // Two keywords for one parameter is CPython's "multiple values for
+        // argument 'x'", which this path must not answer.
+        let target = target?;
+        if slots[..i].contains(&target) {
+            return None;
+        }
+        slots[i] = target;
+    }
+    Some(kw_count)
+}
+
+/// The keyword names of a call, as views into the objects the caller put in the
+/// `kwnames` tuple.
+///
+/// A non-string key is rejected where the call is spelled, long before the
+/// callee is entered, which is what `FuncArgs::from_vectorcall` already relies
+/// on.
+#[inline]
+fn kw_name_views(kwnames: &[PyObjectRef], index: usize) -> &Wtf8 {
+    kwnames[index]
+        .downcast_ref::<PyStr>()
+        .expect("kwnames must be strings")
+        .as_wtf8()
+}
+
+#[cfg(test)]
+mod kwarg_slot_tests {
+    use super::{FAST_KW_ARGS, kwarg_param_slots};
+    use crate::common::wtf8::{Wtf8, Wtf8Buf};
+
+    fn buffers(names: &[&str]) -> Vec<Wtf8Buf> {
+        names.iter().map(|name| Wtf8Buf::from(*name)).collect()
+    }
+
+    fn view(bufs: &[Wtf8Buf], index: usize) -> &Wtf8 {
+        &bufs[index]
+    }
+
+    /// Run the mapping and hand back the slots it wrote, or `None` if it
+    /// refused the call.
+    fn scatter(param_names: &[&str], kw_names: &[&str]) -> Option<Vec<usize>> {
+        let params = buffers(param_names);
+        let kws = buffers(kw_names);
+        let mut slots = [usize::MAX; FAST_KW_ARGS];
+        let bound = kwarg_param_slots(
+            params.len(),
+            |i| view(&params, i),
+            kws.len(),
+            |i| view(&kws, i),
+            &mut slots,
+        );
+        bound.map(|n| slots[..n].to_vec())
+    }
+
+    #[test]
+    fn binds_keywords_in_call_order() {
+        assert_eq!(scatter(&["a", "b"], &["a", "b"]), Some(vec![0, 1]));
+    }
+
+    #[test]
+    fn binds_keywords_out_of_parameter_order() {
+        assert_eq!(scatter(&["a", "b"], &["b", "a"]), Some(vec![1, 0]));
+    }
+
+    #[test]
+    fn binds_a_keyword_after_positional_fill() {
+        // The caller only passes the parameters the positionals left unfilled,
+        // so the offsets are relative to that suffix.
+        assert_eq!(scatter(&["b", "c"], &["c", "b"]), Some(vec![1, 0]));
+    }
+
+    #[test]
+    fn refuses_a_keyword_that_names_no_unfilled_parameter() {
+        assert_eq!(scatter(&["a", "b"], &["a", "c"]), None);
+    }
+
+    #[test]
+    fn refuses_two_keywords_for_one_parameter() {
+        assert_eq!(scatter(&["a", "b"], &["a", "a"]), None);
+    }
+
+    #[test]
+    fn refuses_a_count_that_does_not_fill_the_signature() {
+        assert_eq!(scatter(&["a", "b"], &["a"]), None);
+        assert_eq!(scatter(&["a"], &["a", "b"]), None);
+    }
+
+    #[test]
+    fn refuses_more_arguments_than_the_stack_buffer_holds() {
+        let params: Vec<String> = (0..FAST_KW_ARGS + 1).map(|i| format!("p{i}")).collect();
+        let params: Vec<&str> = params.iter().map(|s| s.as_str()).collect();
+        assert_eq!(scatter(&params, &params), None);
+    }
+
+    #[test]
+    fn binds_a_call_with_no_keywords() {
+        assert_eq!(scatter(&[], &[]), Some(vec![]));
+    }
+
+    #[test]
+    fn compares_names_by_whole_bytes_not_prefix() {
+        assert_eq!(scatter(&["alpha", "b"], &["b", "alpha"]), Some(vec![1, 0]));
+        assert_eq!(scatter(&["alphabet"], &["alpha"]), None);
+    }
+
+    #[test]
+    fn compares_non_ascii_names() {
+        assert_eq!(scatter(&["é", "b"], &["b", "é"]), Some(vec![1, 0]));
+    }
 }

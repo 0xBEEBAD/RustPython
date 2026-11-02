@@ -26,6 +26,8 @@
 //! * `excfuse` - run an `except` clause's `CHECK_EXC_MATCH` and its
 //!   `POP_JUMP_IF_FALSE` as two instructions, and validate every clause target
 //!   through the MRO instead of answering an identical class with one compare
+//! * `kwfast` - bind a keyword call through `FuncArgs` instead of scattering its
+//!   values into the callee's fastlocals slots
 
 use std::sync::OnceLock;
 
@@ -68,6 +70,11 @@ pub(crate) const EXIT_CLONE: u32 = 65536;
 /// instead of reusing a `range_iterator` husk, which is what a nested range loop
 /// paid per outer step before the type got a freelist.
 pub(crate) const RANGE_ITER: u32 = 131072;
+/// Ablating this routes a keyword call back through `FuncArgs` (argument `Vec`,
+/// a heap copy of every keyword name and a keyword map) instead of scattering
+/// its values straight into the callee's fastlocals slots, which is what such a
+/// call did before the shape was recognized.
+pub(crate) const KW_FAST: u32 = 524288;
 /// Ablating this splits an `except` clause back into `CHECK_EXC_MATCH` +
 /// `POP_JUMP_IF_FALSE` and routes every single-class target through the MRO
 /// validation, which is what the clause test did before the pair was fused and
@@ -101,6 +108,7 @@ pub(crate) fn ablated(bit: u32) -> bool {
                     "exitclone" => EXIT_CLONE,
                     "rangeiter" => RANGE_ITER,
                     "excfuse" => EXC_FUSE,
+                    "kwfast" => KW_FAST,
                     _ => 0,
                 };
             }
