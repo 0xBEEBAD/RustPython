@@ -2478,6 +2478,16 @@ pub(crate) fn run_iframe(
     vm: &VirtualMachine,
 ) -> PyResult<ExecutionResult> {
     let code: &Py<PyCode> = unsafe { &*iframe.code };
+    // Measurement instrument: answer an instrumented function with None before
+    // executing its first instruction, so the difference between a normal run
+    // and a stubbed one is the cost of the callee's own bytecode and nothing
+    // else. See `perf_debug::stub_body_fragment`.
+    if crate::perf_debug::stub_body_fragment().is_some()
+        && let Ok(qualname) = code.qualname.as_wtf8().as_str()
+        && crate::perf_debug::body_stubbed(qualname)
+    {
+        return Ok(ExecutionResult::Return(vm.ctx.none()));
+    }
     let globals: &Py<PyDict> = unsafe { &*iframe.globals };
     let builtins: &PyObject = unsafe { &*iframe.builtins };
     let func_obj: Option<&PyObject> = if iframe.func_obj.is_null() {

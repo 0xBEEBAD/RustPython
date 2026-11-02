@@ -899,8 +899,15 @@ impl Py<PyFunction> {
 
         // Measurement-only ablation: consume the arguments and return without
         // touching the callee, so CALL dispatch and argument-move cost can be
-        // read off a single binary and single profile.
-        if crate::perf_debug::ablated(crate::perf_debug::STUB_CALL) {
+        // read off a single binary and single profile. With LUNA_STUB_BODY set,
+        // it applies only to the matching functions, which makes "no frame at
+        // all" comparable with "a frame that does nothing" in one build.
+        if crate::perf_debug::ablated(crate::perf_debug::STUB_CALL)
+            && (crate::perf_debug::stub_body_fragment().is_none()
+                || self.code.qualname.as_wtf8().as_str().is_ok_and(|qualname| {
+                    crate::perf_debug::body_stubbed(qualname)
+                }))
+        {
             for slot in args.iter_mut() {
                 slot.take();
             }

@@ -28,6 +28,12 @@
 //!   through the MRO instead of answering an identical class with one compare
 //! * `kwfast` - bind a keyword call through `FuncArgs` instead of scattering its
 //!   values into the callee's fastlocals slots
+//!
+//! `LUNA_STUB_BODY=<qualname prefix>` is a second, complementary instrument: the
+//! matching functions answer `None` before their first instruction, and
+//! `stubcall` combined with it skips the frame entirely. Run a probe with the
+//! variable set and unset on one binary to split a call's cost into dispatch,
+//! frame entry and the callee's own instructions.
 
 use std::sync::OnceLock;
 
@@ -80,6 +86,33 @@ pub(crate) const KW_FAST: u32 = 524288;
 /// validation, which is what the clause test did before the pair was fused and
 /// the identical-class compare was added.
 pub(crate) const EXC_FUSE: u32 = 262144;
+
+/// Measurement only: the qualified-name prefix whose function bodies are
+/// skipped, so one call splits into "dispatch, argument binding, frame entry
+/// and exit" on one side and the callee's own instructions on the other.
+///
+/// Matching on the qualname instead of the file keeps the probe runnable: the
+/// module-level code object of the very same file still executes. Unset, the
+/// normal case, it costs one cached load per frame entry.
+pub(crate) fn stub_body_fragment() -> Option<&'static str> {
+    static FRAGMENT: OnceLock<Option<&'static str>> = OnceLock::new();
+    *FRAGMENT.get_or_init(|| {
+        std::env::var("LUNA_STUB_BODY")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(|value| &*Box::leak(value.into_boxed_str()))
+    })
+}
+
+/// Whether this frame's body is the instrument's to skip.
+///
+/// A prefix test rather than a substring search, because the answer is computed
+/// on every frame entry: an unset fragment costs one cached load and a set one
+/// costs a length compare plus the prefix bytes. Anything that scans the whole
+/// qualname would measure itself instead of the callee.
+pub(crate) fn body_stubbed(qualname: &str) -> bool {
+    stub_body_fragment().is_some_and(|fragment| qualname.starts_with(fragment))
+}
 
 /// True when the named optimization is ablated through `LUNA_ABLATE`.
 pub(crate) fn ablated(bit: u32) -> bool {
