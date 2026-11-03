@@ -130,6 +130,9 @@ pub(crate) const ARGS_SLACK: u32 = 16777216;
 /// over its own parameters from the caller's argument slots, instead of building
 /// the callee's frame.
 pub(crate) const MICRO_INLINE: u32 = 33554432;
+/// Read a small `BigInt`'s value through the generic `ToPrimitive` conversion
+/// instead of the single-limb test that CPython's compact-long check mirrors.
+pub(crate) const INT_COMPACT: u32 = 67108864;
 
 /// Measurement only: the qualified-name prefix whose function bodies are
 /// skipped, so one call splits into "dispatch, argument binding, frame entry
@@ -192,6 +195,7 @@ pub(crate) fn ablated(bit: u32) -> bool {
                     "armstage" => ARM_STAGE,
                     "argsslack" => ARGS_SLACK,
                     "microinline" => MICRO_INLINE,
+                    "intcompact" => INT_COMPACT,
                     _ => 0,
                 };
             }

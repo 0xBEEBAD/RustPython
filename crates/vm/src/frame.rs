@@ -10107,6 +10107,44 @@ impl ExecutingFrame<'_> {
     /// full BigInt values. Result boxing always goes through `new_int` so the
     /// small-int cache is consulted identically.
     #[inline]
+    /// The value of a BigInt that occupies a single base-2^30 digit, read without
+    /// the generic `ToPrimitive` conversion that `to_i64` runs.
+    ///
+    /// CPython calls this shape a *compact* long and every small-int arithmetic
+    /// path reads its digits directly; here `to_i64` measured as a real part of
+    /// the ~28 ns a comprehension spends per `i * i` element (CPython: 12.5), so
+    /// the fast path in [`Self::int_fast_op`] asks this instead. `None` means
+    /// "multi-limb", which the caller answers with the general operation.
+    /// Ablating `intcompact` puts `to_i64` back so one binary can price both.
+    #[inline]
+    fn compact_i64(a: &BigInt) -> Option<i64> {
+        use malachite_bigint::Sign;
+        use num_traits::ToPrimitive;
+        if crate::perf_debug::ablated(crate::perf_debug::INT_COMPACT) {
+            return a.to_i64();
+        }
+        match a.sign() {
+            Sign::NoSign => Some(0),
+            Sign::Plus => {
+                let mut digits = a.iter_u32_digits();
+                let lo = digits.next()?;
+                if digits.next().is_some() {
+                    return None;
+                }
+                Some(i64::from(lo))
+            }
+            Sign::Minus => {
+                let mut digits = a.iter_u32_digits();
+                let lo = digits.next()?;
+                if digits.next().is_some() {
+                    return None;
+                }
+                // -(2^32-1) is well inside i64, so no overflow check is needed.
+                Some(-i64::from(lo))
+            }
+        }
+    }
+
     fn int_fast_op(
         a: &BigInt,
         b: &BigInt,
@@ -10114,8 +10152,7 @@ impl ExecutingFrame<'_> {
         checked: fn(i64, i64) -> Option<i64>,
         fallback: impl FnOnce(&BigInt, &BigInt) -> BigInt,
     ) -> PyObjectRef {
-        use num_traits::ToPrimitive;
-        if let (Some(av), Some(bv)) = (a.to_i64(), b.to_i64())
+        if let (Some(av), Some(bv)) = (Self::compact_i64(a), Self::compact_i64(b))
             && let Some(result) = checked(av, bv)
         {
             return vm.ctx.new_int(result).into();
