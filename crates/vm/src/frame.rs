@@ -3199,6 +3199,31 @@ impl ExecutingFrame<'_> {
         Ok(())
     }
 
+    /// Handle a trace callback that moved this frame out from under the dispatch
+    /// loop - `set_f_lineno`, or pdb's `jump` command - and report whether the
+    /// caller has to restart from the frame's new `lasti`. `published` is the
+    /// value this frame published for the instruction that fired the event.
+    ///
+    /// `set_f_lineno` queues the operand-stack unwinding instead of performing
+    /// it, because the tracer runs while the frame state mutex is held; drain
+    /// that queue here. Skipping it is what made a move from an 'opcode' event
+    /// crash later on `max_stackdepth`: the jump was taken, the values the
+    /// skipped region had pushed stayed on the stack, and the next push in the
+    /// new region overflowed it.
+    #[inline]
+    fn unwind_after_tracer_move(&mut self, published: u32, vm: &VirtualMachine) -> bool {
+        if self.lasti() == published {
+            return false;
+        }
+        let pops = self.pending_stack_pops();
+        if pops > 0 {
+            let from_stack = self.pending_unwind_from_stack();
+            self.unwind_stack_for_lineno(pops as usize, from_stack, vm);
+            self.set_pending_stack_pops(0);
+        }
+        true
+    }
+
     fn run(&mut self, vm: &VirtualMachine) -> PyResult<ExecutionResult> {
         flame_guard!(format!(
             "FrameObject::run({obj_name})",
@@ -3212,6 +3237,12 @@ impl ExecutingFrame<'_> {
             // thread writes `lasti`, so a relaxed load+store pair keeps the
             // same observable value while avoiding a locked RMW on every
             // single instruction.
+            //
+            // The reload is not dead code: a jump arm, `unwind_blocks`
+            // publishing an in-frame handler, and a tracer that moved the frame
+            // all rewrite `lasti`, so the loop has to read it back per iteration.
+            // Carrying the index in a local instead measured 1.4 % worse on the
+            // dispatch floor and 5.3 % worse on bench.py (release-lite, 2026-11-03).
             let idx = self.lasti.load(atomic::Ordering::Relaxed) as usize;
             self.lasti
                 .store((idx + 1) as u32, atomic::Ordering::Relaxed);
@@ -3239,16 +3270,10 @@ impl ExecutingFrame<'_> {
                     self.prev_line.set(loc.line.get() as u32);
                     vm.trace_event(crate::protocol::TraceEvent::Line, None)?;
                     // Trace callback may have changed lasti via set_f_lineno.
-                    // Re-read and restart the loop from the new position.
-                    if self.lasti() != (idx as u32 + 1) {
-                        // set_f_lineno defers stack unwinding because we hold
-                        // the state mutex.  Perform it now.
-                        let pops = self.pending_stack_pops();
-                        if pops > 0 {
-                            let from_stack = self.pending_unwind_from_stack();
-                            self.unwind_stack_for_lineno(pops as usize, from_stack, vm);
-                            self.set_pending_stack_pops(0);
-                        }
+                    // Drain the operand-stack unwind it queued, then restart
+                    // the loop from the new position (the top of the loop
+                    // re-reads lasti).
+                    if self.unwind_after_tracer_move(idx as u32 + 1, vm) {
                         arg_state.reset();
                         continue;
                     }
@@ -3265,6 +3290,17 @@ impl ExecutingFrame<'_> {
                     )
                 {
                     vm.trace_event(crate::protocol::TraceEvent::Opcode, None)?;
+                    // An opcode-event tracer can move the frame with
+                    // set_f_lineno just like a line-event one, and the loop
+                    // picks the new position up on its next reload - but only
+                    // if the operand-stack unwind the move queued is drained
+                    // here. Without it the jump was taken and the values the
+                    // skipped region had pushed stayed live, so the next push
+                    // aborted on max_stackdepth.
+                    if self.unwind_after_tracer_move(idx as u32 + 1, vm) {
+                        arg_state.reset();
+                        continue;
+                    }
                 }
             }
 
@@ -3314,6 +3350,11 @@ impl ExecutingFrame<'_> {
             // 3-deep opcode dispatch chain, so compute it lazily — only
             // for fall-through instructions (jumps never need it).
             let result = self.execute_instruction(op, arg, &mut do_extend_arg, vm);
+            // lasti is already idx+1 from the publish above; if the
+            // instruction fell through (no jump), skip its inline cache
+            // entries with a single direct store. cache_entries() is a
+            // 3-deep opcode dispatch chain, so compute it lazily — only
+            // for fall-through instructions (jumps never need it).
             if self.lasti.load(atomic::Ordering::Relaxed) as usize == idx + 1 {
                 let caches = op.cache_entries();
                 if caches > 0 {
