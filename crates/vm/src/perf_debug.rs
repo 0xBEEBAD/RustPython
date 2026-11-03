@@ -133,6 +133,27 @@ pub(crate) const MICRO_INLINE: u32 = 33554432;
 /// Read a small `BigInt`'s value through the generic `ToPrimitive` conversion
 /// instead of the single-limb test that CPython's compact-long check mirrors.
 pub(crate) const INT_COMPACT: u32 = 67108864;
+/// Measurement only: skip the `__context__` chaining a raise performs when it
+/// contextualizes an exception, so the cost of reading the in-flight exception
+/// and writing the link can be read off one binary. Never enable while running
+/// real code: `raise` inside an `except` clause would lose its context.
+pub(crate) const EXC_CTX: u32 = 134217728;
+/// Measurement only: skip the work a frame does on its way out when an exception
+/// escapes it - the `PY_UNWIND` monitoring test and the `lasti` restore that
+/// keeps `frame.f_lineno` equal to `tb_lineno` - so the cost of that tail can be
+/// separated from the traceback entry and the block unwinding around it.
+pub(crate) const EXC_UNWINDTAIL: u32 = 268435456;
+/// Measurement only: leave a constructed exception's `args` empty instead of
+/// boxing the argument tuple, which prices the tuple allocation and its GC
+/// tracking that every `ValueError(x)` pays. Never enable while running real
+/// code: `args` is what `str(exc)`, pickling and re-raising read.
+pub(crate) const EXC_ARGS: u32 = 536870912;
+/// Measurement only: add no traceback entry when an exception passes through a
+/// frame, which prices both the entry object and the frame object it holds -
+/// the frame object is what turns an unmaterialized frame into one that has to
+/// be cleared on the way out. Never enable while running real code: tracebacks
+/// and `sys.exc_info()` line numbers depend on it.
+pub(crate) const EXC_TB: u32 = 1073741824;
 
 /// Measurement only: the qualified-name prefix whose function bodies are
 /// skipped, so one call splits into "dispatch, argument binding, frame entry
@@ -196,7 +217,22 @@ pub(crate) fn ablated(bit: u32) -> bool {
                     "argsslack" => ARGS_SLACK,
                     "microinline" => MICRO_INLINE,
                     "intcompact" => INT_COMPACT,
-                    _ => 0,
+                    "excctx" => EXC_CTX,
+                    "excunwindtail" => EXC_UNWINDTAIL,
+                    "excargs" => EXC_ARGS,
+                    "exctb" => EXC_TB,
+                    // A bare number is accepted as the bit mask itself, so a
+                    // probe can address a bit that has no alias here. Unknown
+                    // text used to read as "no bits at all", which made an
+                    // A/B of a freshly added gate look exactly like a null
+                    // result instead of a missing alias - hence the warning.
+                    other => match other.parse::<u32>() {
+                        Ok(mask) => mask,
+                        Err(_) => {
+                            eprintln!("LUNA_ABLATE: unknown ablation {other:?}, ignored");
+                            0
+                        }
+                    },
                 };
             }
         }

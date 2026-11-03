@@ -602,12 +602,19 @@ macro_rules! extend_exception {
 
 impl PyBaseException {
     pub(crate) fn new(args: Vec<PyObjectRef>, vm: &VirtualMachine) -> Self {
+        let args = if crate::perf_debug::ablated(crate::perf_debug::EXC_ARGS) {
+            // The shared empty tuple is not allocated, so this ablation prices
+            // the tuple box and its GC tracking that every construction pays.
+            vm.ctx.empty_tuple.clone()
+        } else {
+            PyTuple::new_ref(args, &vm.ctx)
+        };
         Self {
             traceback: PyRwLock::new(None),
             cause: PyRwLock::new(None),
             context: PyRwLock::new(None),
             suppress_context: AtomicCell::new(false),
-            args: PyRwLock::new(Some(PyTuple::new_ref(args, &vm.ctx))),
+            args: PyRwLock::new(Some(args)),
         }
     }
 

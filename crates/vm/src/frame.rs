@@ -3396,7 +3396,9 @@ impl ExecutingFrame<'_> {
                             // checking for duplicates. Each time an exception passes through
                             // a frame (e.g., in a loop with repeated raise statements),
                             // a new traceback entry is added.
-                            if let Some((loc, _end_loc)) = frame.code.locations.get(idx) {
+                            if !crate::perf_debug::ablated(crate::perf_debug::EXC_TB)
+                                && let Some((loc, _end_loc)) = frame.code.locations.get(idx)
+                            {
                                 let new_traceback = PyTraceback::new(
                                     prior_tb,
                                     frame.frame_object(vm),
@@ -3418,7 +3420,9 @@ impl ExecutingFrame<'_> {
                             // - It's an explicit raise (raise/raise from)
                             // - The exception had no prior traceback (originated here)
                             if is_new_raise || !had_prior_traceback {
-                                vm.contextualize_exception(&exception);
+                                if !crate::perf_debug::ablated(crate::perf_debug::EXC_CTX) {
+                                    vm.contextualize_exception(&exception);
+                                }
                             }
                         }
 
@@ -3491,6 +3495,9 @@ impl ExecutingFrame<'_> {
                         Ok(None) => {}
                         Ok(Some(result)) => break Ok(result),
                         Err(exception) => {
+                            if crate::perf_debug::ablated(crate::perf_debug::EXC_UNWINDTAIL) {
+                                break Err(exception);
+                            }
                             // Fire PY_UNWIND: exception escapes this frame
                             let exception = if vm.state.monitoring_events.load()
                                 & monitoring::EVENT_PY_UNWIND
