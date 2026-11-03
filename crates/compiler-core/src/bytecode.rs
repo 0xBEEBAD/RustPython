@@ -737,6 +737,25 @@ impl CodeUnits {
         OpArgByte::from(unsafe { &*arg_ptr }.load(Ordering::Relaxed))
     }
 
+    /// Read one whole code unit - opcode and arg byte - with a single 16-bit
+    /// atomic load.
+    ///
+    /// The fetch half of the interpreter loop needs both bytes of the unit it is
+    /// about to execute, and `read_op` plus `read_arg` reload the unit array
+    /// pointer and take two dependent atomic loads for it. `CodeUnit` is
+    /// `#[repr(C)]` and exactly two bytes (the assert next to its definition),
+    /// so one aligned `u16` covers both, and the cache reads already treat this
+    /// same storage as `u16`-addressable.
+    pub fn read_unit(&self, index: usize) -> (Instruction, OpArgByte) {
+        debug_assert!(index < unsafe { (&*self.units.get()).len() }, "read_unit: index out of bounds");
+        let units = unsafe { &*self.units.get() };
+        let ptr = units.as_ptr().wrapping_add(index) as *const AtomicU16;
+        let word = unsafe { &*ptr }.load(Ordering::Relaxed);
+        // SAFETY: Only valid Instruction values are stored via replace_op/compare_exchange_op.
+        let op = unsafe { mem::transmute::<u8, Instruction>(word as u8) };
+        (op, OpArgByte::from((word >> 8) as u8))
+    }
+
     /// Write a u16 value into a CACHE code unit at `index`.
     /// Each CodeUnit is 2 bytes (#[repr(C)]: op u8 + arg u8), so one u16 fits exactly.
     /// Uses Relaxed atomic store; ordering is provided by replace_op (Release).
@@ -1337,9 +1356,35 @@ mod tests {
     use super::*;
     use alloc::{vec, vec::Vec};
 
+    /// The fused fetch the interpreter loop uses has to answer exactly what the
+    /// two separate reads it replaced answered - including the arg byte after an
+    /// in-place opcode rewrite, which is how specialization changes a unit.
     #[test]
-    fn exception_table_encode_decode() {
-        let entries = vec![
+    fn read_unit_matches_separate_reads() {
+        let units = CodeUnits::from(vec![
+            CodeUnit::new(Instruction::Nop, 7u8.into()),
+            CodeUnit::new(Instruction::Cache, 0u8.into()),
+            CodeUnit::new(Instruction::PopTop, 255u8.into()),
+        ]);
+        for index in 0..3 {
+            let (op, arg) = units.read_unit(index);
+            assert_eq!(u8::from(op), u8::from(units.read_op(index)), "opcode at {index}");
+            assert_eq!(
+                u8::from(arg),
+                u8::from(units.read_arg(index)),
+                "arg at {index}"
+            );
+        }
+        // SAFETY: index 0 is in bounds, and Cache shares the arg semantics of
+        // the Nop it replaces.
+        unsafe { units.replace_op(0, Instruction::Cache) };
+        let (op, arg) = units.read_unit(0);
+        assert_eq!(u8::from(op), u8::from(Instruction::Cache));
+        assert_eq!(u8::from(arg), 7);
+    }
+
+    #[test]
+    fn exception_table_encode_decode() {        let entries = vec![
             ExceptionTableEntry::new(0, 10, 20, 2, false),
             ExceptionTableEntry::new(15, 25, 30, 1, true),
         ];

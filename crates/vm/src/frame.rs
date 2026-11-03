@@ -3216,8 +3216,8 @@ impl ExecutingFrame<'_> {
             self.lasti
                 .store((idx + 1) as u32, atomic::Ordering::Relaxed);
 
-            let op = self.code.instructions.read_op(idx);
-            let arg = arg_state.extend(self.code.instructions.read_arg(idx));
+            let (op, raw_arg) = self.code.instructions.read_unit(idx);
+            let arg = arg_state.extend(raw_arg);
             let mut do_extend_arg = false;
 
             // Both per-instruction trace hooks share one `use_tracing`
