@@ -501,6 +501,41 @@ impl VirtualMachine {
         ))
     }
 
+    /// `seq * n`'s multiplier. CPython's `sequence_repeat` takes an index and
+    /// words anything that is not one by naming its type, while the same value
+    /// reaching a subscript goes through `PyNumber_AsSsize_t` and says "cannot
+    /// be interpreted as an integer" - so only the not-an-index case is
+    /// re-worded here. An index too large for a machine word keeps the size
+    /// error the repeat itself has always reported.
+    pub(crate) fn repeat_count(&self, n: &PyObject) -> PyResult<isize> {
+        use num_traits::ToPrimitive;
+        let Some(result) = n.try_index_opt(self) else {
+            return Err(self.new_type_error(format!(
+                "can't multiply sequence by non-int of type '{}'",
+                n.class().name()
+            )));
+        };
+        Ok(result?
+            .as_bigint()
+            .to_isize()
+            .ok_or_else(|| self.new_overflow_error("repeated bytes are too long"))?)
+    }
+
+    /// The first item a `join` cannot use. Both `str.join` and the bytes
+    /// family report the position rather than only the type, so the loop that
+    /// converts as it iterates has to carry the index.
+    pub(crate) fn new_join_item_error(
+        &self,
+        expected: &str,
+        index: usize,
+        item: &PyObject,
+    ) -> PyBaseExceptionRef {
+        self.new_type_error(format!(
+            "sequence item {index}: expected {expected}, {} found",
+            item.class().name()
+        ))
+    }
+
     pub fn new_unsupported_ternary_op_error(
         &self,
         a: &PyObject,

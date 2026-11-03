@@ -12,7 +12,7 @@ use crate::{
     builtins::{PyFloat, PyInt, PyStr, PyTuple},
     class::PyClassImpl,
     convert::ToPyObject,
-    function::{ArgSize, Either, FuncArgs, OptionalArg, PyComparisonValue},
+    function::{Either, FuncArgs, OptionalArg, PyComparisonValue},
     iter::PyExactSizeIterator,
     protocol::{PyIterReturn, PyMappingMethods, PySequenceMethods},
     recursion::ReprGuard,
@@ -364,12 +364,12 @@ impl PyList {
         self._setitem(&needle, value, vm)
     }
 
-    fn __mul__(&self, n: ArgSize, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
-        self.repeat(n.into(), vm)
+    fn __mul__(&self, n: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
+        self.repeat(vm.repeat_count(&n)?, vm)
     }
 
-    fn __imul__(zelf: PyRef<Self>, n: ArgSize, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
-        Self::irepeat(zelf, n.into(), vm)
+    fn __imul__(zelf: PyRef<Self>, n: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
+        Self::irepeat(zelf, vm.repeat_count(&n)?, vm)
     }
 
     #[pymethod]

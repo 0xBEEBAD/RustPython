@@ -23,7 +23,7 @@ use crate::{
     },
     convert::{ToPyObject, ToPyResult},
     function::{
-        ArgBytesLike, ArgIterable, ArgSize, Either, OptionalArg, OptionalOption, PyArithmeticValue,
+        ArgBytesLike, Either, OptionalArg, OptionalOption, PyArithmeticValue,
         PyComparisonValue,
     },
     protocol::{
@@ -379,8 +379,8 @@ impl PyByteArray {
     }
 
     #[pymethod]
-    fn join(&self, iter: ArgIterable<PyBytesInner>, vm: &VirtualMachine) -> PyResult<Self> {
-        Ok(self.inner().join(iter, vm)?.into())
+    fn join(&self, object: PyObjectRef, vm: &VirtualMachine) -> PyResult<Self> {
+        Ok(self.inner().join(object, vm)?.into())
     }
 
     #[pymethod]
@@ -548,12 +548,12 @@ impl PyByteArray {
         self.inner().title().into()
     }
 
-    fn __mul__(&self, value: ArgSize, vm: &VirtualMachine) -> PyResult<Self> {
-        self.repeat(value.into(), vm)
+    fn __mul__(&self, value: PyObjectRef, vm: &VirtualMachine) -> PyResult<Self> {
+        self.repeat(vm.repeat_count(&value)?, vm)
     }
 
-    fn __imul__(zelf: PyRef<Self>, value: ArgSize, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
-        Self::irepeat(&zelf, value.into(), vm)?;
+    fn __imul__(zelf: PyRef<Self>, value: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
+        Self::irepeat(&zelf, vm.repeat_count(&value)?, vm)?;
         Ok(zelf)
     }
 

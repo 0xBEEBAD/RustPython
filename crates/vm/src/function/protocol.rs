@@ -104,6 +104,24 @@ impl<T> ArgIterable<T> {
     }
 }
 
+/// The iterable argument of a `join`. CPython materializes it with
+/// `PySequence_Fast`, whose error message is the separator's own wording -
+/// "can only join an iterable" - rather than the generic "object is not
+/// iterable", and only replaces a TypeError, so an error raised by a working
+/// `__iter__` still travels unchanged.
+pub(crate) fn join_iterable(
+    vm: &VirtualMachine,
+    object: PyObjectRef,
+) -> PyResult<ArgIterable<PyObjectRef>> {
+    ArgIterable::try_from_object(vm, object).map_err(|err| {
+        if err.fast_isinstance(&vm.ctx.exceptions.type_error) {
+            vm.new_type_error("can only join an iterable".to_owned())
+        } else {
+            err
+        }
+    })
+}
+
 impl<T> TryFromObject for ArgIterable<T>
 where
     T: TryFromObject,

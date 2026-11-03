@@ -10,7 +10,7 @@ use crate::{
     cformat::cformat_bytes,
     common::hash,
     common::wtf8::is_py_ascii_whitespace,
-    function::{ArgIterable, Either, OptionalArg, OptionalOption, PyComparisonValue},
+    function::{Either, OptionalArg, OptionalOption, PyComparisonValue},
     literal::escape::Escape,
     protocol::PyBuffer,
     sequence::{SequenceExt, SequenceMutExt},
@@ -582,9 +582,31 @@ impl PyBytesInner {
             .py_count(needle.as_slice(), range, |h, n| h.find_iter(n).count()))
     }
 
-    pub fn join(&self, iterable: ArgIterable<Self>, vm: &VirtualMachine) -> PyResult<Vec<u8>> {
-        let iter = iterable.iter(vm)?;
-        self.elements.py_join(iter)
+    pub fn join(&self, object: PyObjectRef, vm: &VirtualMachine) -> PyResult<Vec<u8>> {
+        // CPython's bytes.join converts while it walks and names the position of
+        // the first item that is not bytes-like, which the conversion's own
+        // message ("can assign only bytes, buffers, or iterables of ints") does
+        // not carry.
+        let mut joined: Vec<u8> = Vec::new();
+        for (index, item) in crate::function::join_iterable(vm, object)?
+            .iter(vm)?
+            .enumerate()
+        {
+            let item = item?;
+            // A buffer, as CPython's `bytes.join` requires: the looser
+            // `PyBytesInner` conversion would accept an iterable of ints here,
+            // which `PyObject_GetBuffer` rejects.
+            let buffer = PyBuffer::try_from_borrowed_object(vm, &item)
+                .map_err(|_| vm.new_join_item_error("a bytes-like object", index, &item))?;
+            if index > 0 {
+                joined.extend_from_slice(&self.elements);
+            }
+            match buffer.as_contiguous() {
+                Some(bytes) => joined.extend_from_slice(&bytes),
+                None => buffer.append_to(&mut joined),
+            }
+        }
+        Ok(joined)
     }
 
     #[inline]

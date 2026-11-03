@@ -16,7 +16,7 @@ use crate::{
     common::{hash::PyHash, lock::PyMutex},
     convert::{ToPyObject, ToPyResult},
     function::{
-        ArgBytesLike, ArgIndex, ArgIterable, Either, FuncArgs, OptionalArg, OptionalOption,
+        ArgBytesLike, Either, FuncArgs, OptionalArg, OptionalOption,
         PyArithmeticValue, PyComparisonValue,
     },
     protocol::{
@@ -369,8 +369,8 @@ impl PyBytes {
     }
 
     #[pymethod]
-    fn join(&self, iter: ArgIterable<PyBytesInner>, vm: &VirtualMachine) -> PyResult<Self> {
-        Ok(self.inner.join(iter, vm)?.into())
+    fn join(&self, object: PyObjectRef, vm: &VirtualMachine) -> PyResult<Self> {
+        Ok(self.inner.join(object, vm)?.into())
     }
 
     #[pymethod]
@@ -535,8 +535,8 @@ impl PyBytes {
         self.inner.title().into()
     }
 
-    fn __mul__(zelf: PyRef<Self>, value: ArgIndex, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
-        zelf.repeat(value.into_int_ref().try_to_primitive(vm)?, vm)
+    fn __mul__(zelf: PyRef<Self>, value: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
+        zelf.repeat(vm.repeat_count(&value)?, vm)
     }
 
     fn __mod__(&self, values: PyObjectRef, vm: &VirtualMachine) -> PyResult<Self> {

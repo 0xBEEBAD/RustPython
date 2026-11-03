@@ -20,7 +20,7 @@ use crate::{
     },
     convert::{IntoPyException, ToPyException, ToPyObject, ToPyResult},
     format::{format, format_map},
-    function::{ArgIterable, ArgSize, FuncArgs, OptionalArg, OptionalOption, PyComparisonValue},
+    function::{FuncArgs, OptionalArg, OptionalOption, PyComparisonValue},
     intern::PyInterned,
     object::{MaybeTraverse, Traverse, TraverseFn},
     protocol::{PyIterReturn, PyMappingMethods, PyNumberMethods, PySequenceMethods},
@@ -870,8 +870,8 @@ impl PyStr {
             + self.byte_len() * core::mem::size_of::<u8>()
     }
 
-    fn __mul__(zelf: PyRef<Self>, value: ArgSize, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
-        Self::repeat(zelf, value.into(), vm)
+    fn __mul__(zelf: PyRef<Self>, value: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
+        Self::repeat(zelf, vm.repeat_count(&value)?, vm)
     }
 
     #[inline]
@@ -1473,37 +1473,56 @@ impl PyStr {
     }
 
     #[pymethod]
-    fn join(
-        zelf: PyRef<Self>,
-        iterable: ArgIterable<PyStrRef>,
-        vm: &VirtualMachine,
-    ) -> PyResult<PyStrRef> {
+    fn join(zelf: PyRef<Self>, object: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyStrRef> {
         // Fast path: exact list/tuple of exact str â€” skip the
         // iterator protocol and per-element conversion entirely.
-        let obj = iterable.as_object();
-        if let Some(list) = obj.downcast_ref_if_exact::<PyList>(vm) {
+        if let Some(list) = object.downcast_ref_if_exact::<PyList>(vm) {
             let items = list.borrow_vec();
             if let Some(result) = Self::try_join_exact_strs(&items, zelf.as_wtf8(), vm) {
                 return Ok(result);
             }
-        } else if let Some(tuple) = obj.downcast_ref_if_exact::<PyTuple>(vm) {
+        } else if let Some(tuple) = object.downcast_ref_if_exact::<PyTuple>(vm) {
             let items = tuple.as_slice();
             if let Some(result) = Self::try_join_exact_strs(items, zelf.as_wtf8(), vm) {
                 return Ok(result);
             }
         }
-        let iter = iterable.iter(vm)?;
-        let joined = match iter.exactly_one() {
-            Ok(first) => {
-                let first = first?;
-                if first.as_object().class().is(vm.ctx.types.str_type) {
-                    return Ok(first);
-                }
-                first.as_wtf8().to_owned()
-            }
-            Err(iter) => zelf.as_wtf8().py_join(iter)?,
+        let mut iter = crate::function::join_iterable(vm, object)?.iter(vm)?;
+        // CPython converts while it walks and blames the position of the first
+        // item that is not a string, which the conversion's own message does
+        // not carry, so the index is tracked here.
+        let Some(first) = iter.next() else {
+            return Ok(vm.ctx.new_str(Wtf8Buf::new()));
         };
+        let first = first?;
+        let first = Self::joined_item(&first, 0, vm)?;
+        let Some(second) = iter.next() else {
+            return Ok(if first.class().is(vm.ctx.types.str_type) {
+                first
+            } else {
+                vm.ctx.new_str(first.as_wtf8().to_owned())
+            });
+        };
+        let second = second?;
+        let mut joined = first.as_wtf8().to_owned();
+        joined.push_wtf8(zelf.as_wtf8());
+        joined.push_wtf8(Self::joined_item(&second, 1, vm)?.as_wtf8());
+        let mut index = 2;
+        for item in iter {
+            let item = item?;
+            joined.push_wtf8(zelf.as_wtf8());
+            joined.push_wtf8(Self::joined_item(&item, index, vm)?.as_wtf8());
+            index += 1;
+        }
         Ok(vm.ctx.new_str(joined))
+    }
+
+    /// One element of a `join`: any string, including a subclass, as CPython
+    /// accepts, and the separator's own complaint when it is not one.
+    fn joined_item(item: &PyObject, index: usize, vm: &VirtualMachine) -> PyResult<PyStrRef> {
+        item.downcast_ref::<Self>()
+            .map(|s| s.to_owned())
+            .ok_or_else(|| vm.new_join_item_error("str instance", index, item))
     }
 
     /// The bytes the character range `range` spans and the byte offset it
@@ -2042,7 +2061,12 @@ impl AsNumber for PyStr {
                     return Ok(vm.ctx.not_implemented());
                 };
                 let Some(b) = b.downcast_ref::<PyStr>() else {
-                    return Ok(vm.ctx.not_implemented());
+                    // CPython's `unicode_add` refuses any non-string once the
+                    // reflected slot has declined, and `str.__add__` *is* that
+                    // function, so the refusal and its wording belong to the
+                    // string side rather than to the interpreter's fallback -
+                    // which is why the answer is not NotImplemented here.
+                    return PyStr::__add__(a.to_owned(), b.to_owned(), vm);
                 };
                 let (a_wtf8, b_wtf8) = (a.as_wtf8(), b.as_wtf8());
                 // Short results fit in the header-owned SSO buffer; build them

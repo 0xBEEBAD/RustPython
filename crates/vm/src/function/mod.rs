@@ -25,6 +25,7 @@ pub(super) use getset::{IntoPyGetterFunc, IntoPySetterFunc, PyGetterFunc, PySett
 pub use method::{HeapMethodDef, PyMethodDef, PyMethodFlags};
 pub use number::{ArgIndex, ArgIntoBool, ArgIntoComplex, ArgIntoFloat, ArgPrimitiveIndex, ArgSize};
 pub use protocol::{ArgCallable, ArgIterable, ArgMapping, ArgSequence};
+pub(crate) use protocol::join_iterable;
 pub use time::TimeoutSeconds;
 
 use crate::{PyObject, PyResult, VirtualMachine, builtins::PyStr, convert::TryFromBorrowedObject};

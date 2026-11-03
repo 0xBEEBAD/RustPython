@@ -542,18 +542,10 @@ impl VirtualMachine {
             return Ok(result);
         }
         if let Ok(seq_a) = a.try_sequence(self) {
-            let n = b
-                .try_index(self)?
-                .as_bigint()
-                .to_isize()
-                .ok_or_else(|| self.new_overflow_error("repeated bytes are too long"))?;
+            let n = self.repeat_count(b)?;
             return seq_a.repeat(n, self);
         } else if let Ok(seq_b) = b.try_sequence(self) {
-            let n = a
-                .try_index(self)?
-                .as_bigint()
-                .to_isize()
-                .ok_or_else(|| self.new_overflow_error("repeated bytes are too long"))?;
+            let n = self.repeat_count(a)?;
             return seq_b.repeat(n, self);
         }
         Err(self.new_unsupported_bin_op_error(a, b, "*"))
@@ -594,18 +586,10 @@ impl VirtualMachine {
             return Ok(result);
         }
         if let Ok(seq_a) = a.try_sequence(self) {
-            let n = b
-                .try_index(self)?
-                .as_bigint()
-                .to_isize()
-                .ok_or_else(|| self.new_overflow_error("repeated bytes are too long"))?;
+            let n = self.repeat_count(b)?;
             return seq_a.inplace_repeat(n, self);
         } else if let Ok(seq_b) = b.try_sequence(self) {
-            let n = a
-                .try_index(self)?
-                .as_bigint()
-                .to_isize()
-                .ok_or_else(|| self.new_overflow_error("repeated bytes are too long"))?;
+            let n = self.repeat_count(a)?;
             /* Note that the right hand operand should not be
              * mutated in this case so inplace_repeat is not
              * used. */
