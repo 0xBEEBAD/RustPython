@@ -30,6 +30,12 @@
 //!   values into the callee's fastlocals slots
 //! * `defbind` - bind a call that needs defaults through `FuncArgs` instead of
 //!   writing the given values and the covering defaults into fastlocals
+//! * `armguards` - skip the exact-args call kernel's eligibility checks
+//!   (datastack space, recursion depth, tail-call shape); measurement-only, the
+//!   checks are what keep a deep or wide call from overrunning the frame
+//! * `armstage` - consume the caller's argument slots and answer `None` without
+//!   building the callee frame, to price the staging loop and kernel entry; needs
+//!   `LUNA_STUB_BODY` to name the functions it may stub, like `stubcall` does
 //!
 //! `LUNA_STUB_BODY=<qualname prefix>` is a second, complementary instrument: the
 //! matching functions answer `None` before their first instruction, and
@@ -99,6 +105,18 @@ pub(crate) const DEF_BIND: u32 = 2097152;
 /// validation, which is what the clause test did before the pair was fused and
 /// the identical-class compare was added.
 pub(crate) const EXC_FUSE: u32 = 262144;
+/// Measurement only: skip the eligibility checks the exact-args call kernel runs
+/// before it stages the arguments (datastack space, recursion depth, tail-call
+/// shape). Together with `armstage` this splits that kernel into guards, staging
+/// and the callee entry. Never enable while running real code: the datastack and
+/// depth checks are what keep a deep or wide call from overrunning the frame.
+pub(crate) const ARM_GUARDS: u32 = 4194304;
+/// Measurement only: consume the caller's argument slots and answer `None`
+/// without building the callee's frame, so a probe can read the cost of the
+/// staging loop and the kernel entry apart from everything below it. Like
+/// `stubcall` it applies only to the functions `LUNA_STUB_BODY` names, since a
+/// callee that never runs cannot produce the objects the interpreter boots on.
+pub(crate) const ARM_STAGE: u32 = 8388608;
 
 /// Measurement only: the qualified-name prefix whose function bodies are
 /// skipped, so one call splits into "dispatch, argument binding, frame entry
@@ -157,6 +175,8 @@ pub(crate) fn ablated(bit: u32) -> bool {
                     "kwfast" => KW_FAST,
                     "noenter" => NO_ENTER,
                     "defbind" => DEF_BIND,
+                    "armguards" => ARM_GUARDS,
+                    "armstage" => ARM_STAGE,
                     _ => 0,
                 };
             }

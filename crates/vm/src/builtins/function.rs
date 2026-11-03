@@ -1064,7 +1064,7 @@ impl Py<PyFunction> {
     /// the instrument names, so the same flags that make a probe readable leave
     /// the interpreter's own startup calls alone.
     #[inline]
-    fn stub_body_matches(&self) -> bool {
+    pub(crate) fn stub_body_matches(&self) -> bool {
         crate::perf_debug::stub_body_fragment().is_some()
             && self
                 .code

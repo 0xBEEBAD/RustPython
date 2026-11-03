@@ -6489,18 +6489,43 @@ impl ExecutingFrame<'_> {
                     if !func.has_exact_argcount(effective_nargs) {
                         return self.execute_call_vectorcall(nargs, vm);
                     }
-                    if !self.specialization_has_datastack_space_for_func(vm, func) {
-                        return self.execute_call_vectorcall(nargs, vm);
+                    // `armguards` skips this eligibility cluster and `armstage`
+                    // stops after it, so the kernel's remaining cost can be read
+                    // off one binary. Both are measurement-only; see perf_debug.
+                    // `armstage` only answers for the functions `LUNA_STUB_BODY`
+                    // names, because a call that never runs its callee cannot
+                    // boot the interpreter.
+                    let measurement_stage =
+                        crate::perf_debug::ablated(crate::perf_debug::ARM_STAGE)
+                            && func.stub_body_matches();
+                    if !crate::perf_debug::ablated(crate::perf_debug::ARM_GUARDS) {
+                        if !self.specialization_has_datastack_space_for_func(vm, func) {
+                            return self.execute_call_vectorcall(nargs, vm);
+                        }
+                        if self.specialization_call_recursion_guard(vm) {
+                            return self.execute_call_vectorcall(nargs, vm);
+                        }
+                        if self.tailcall_enabled
+                            && !func.is_generator_like()
+                            && !crate::perf_debug::ablated(crate::perf_debug::NO_TAILCALL)
+                            && !measurement_stage
+                        {
+                            self.tailcall_prepare_frame(nargs, self_or_null_is_some, vm);
+                            return Ok(Some(ExecutionResult::TailCall));
+                        }
                     }
-                    if self.specialization_call_recursion_guard(vm) {
-                        return self.execute_call_vectorcall(nargs, vm);
-                    }
-                    if self.tailcall_enabled
-                        && !func.is_generator_like()
-                        && !crate::perf_debug::ablated(crate::perf_debug::NO_TAILCALL)
-                    {
-                        self.tailcall_prepare_frame(nargs, self_or_null_is_some, vm);
-                        return Ok(Some(ExecutionResult::TailCall));
+                    if measurement_stage {
+                        for _ in 0..nargs {
+                            self.pop_value();
+                        }
+                        self.pop_value_opt();
+                        self.pop_value();
+                        self.push_value_or_discard(
+                            vm.ctx.none(),
+                            Instruction::from(Opcode::Call).cache_entries(),
+                            vm,
+                        );
+                        return Ok(None);
                     }
                     // Recursive path: pop args and call.
                     let base = usize::from(self_or_null_is_some);
