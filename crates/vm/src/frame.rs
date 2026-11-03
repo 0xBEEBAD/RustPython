@@ -6556,6 +6556,39 @@ impl ExecutingFrame<'_> {
                     let measurement_stage =
                         crate::perf_debug::ablated(crate::perf_debug::ARM_STAGE)
                             && func.stub_body_matches();
+                    // Micro-inline: when the callee's entire body is one
+                    // arithmetic expression over its own parameters, the answer
+                    // is `bin_op_exact_fast` on two values already on this stack,
+                    // so frame construction, entry and return (the ~60 ns that
+                    // `armstage` prices) never happen. `bin_op_exact_fast` only
+                    // answers for operand pairs it can add or multiply without the
+                    // generic protocol, which is what makes the accepted shape
+                    // unable to raise - so no call that CPython would give a
+                    // callee frame in a traceback is answered here.
+                    // `LUNA_ABLATE=microinline` restores the frame for every call.
+                    if !crate::perf_debug::ablated(crate::perf_debug::MICRO_INLINE)
+                        && !measurement_stage
+                        && !vm.use_tracing.get()
+                        && vm.state.monitoring_events.load() == 0
+                        && let Some(result) = self.micro_inline_value(
+                            func,
+                            nargs as usize,
+                            usize::from(self_or_null_is_some),
+                            vm,
+                        )
+                    {
+                        for _ in 0..nargs {
+                            self.pop_value();
+                        }
+                        self.pop_value_opt();
+                        self.pop_value();
+                        self.push_value_or_discard(
+                            result,
+                            Instruction::from(Opcode::Call).cache_entries(),
+                            vm,
+                        );
+                        return Ok(None);
+                    }
                     if !crate::perf_debug::ablated(crate::perf_debug::ARM_GUARDS) {
                         if !self.specialization_has_datastack_space_for_func(vm, func) {
                             return self.execute_call_vectorcall(nargs, vm);
@@ -9919,6 +9952,53 @@ impl ExecutingFrame<'_> {
     /// the operands are not exact builtin numbers, leaving the caller to use
     /// the generic protocol path.
     #[inline]
+    /// Answer a call straight from the caller's stack when the callee's entire
+    /// body is one arithmetic expression over its parameters (see
+    /// [`crate::builtins::code::MicroPlan`], computed once per code object).
+    ///
+    /// `None` means "build the frame", which is the ordinary path and correct for
+    /// everything; a value comes back only for operand pairs `bin_op_exact_fast`
+    /// itself produces, so a shape that could raise, run a reflected operator or
+    /// call a hook is never answered here - which is why skipping the callee frame
+    /// cannot change a traceback.
+    #[inline]
+    fn micro_inline_value(
+        &self,
+        func: &PyFunction,
+        nargs: usize,
+        base: usize,
+        vm: &VirtualMachine,
+    ) -> Option<PyObjectRef> {
+        use crate::builtins::code::MicroOperand;
+        let plan = func.code.micro_plan?;
+        let effective = nargs + base;
+        if usize::try_from(plan.arity).ok()? != effective {
+            return None;
+        }
+        // Parameter k sits `effective - 1 - k` deep: the call stack is
+        // [callable, self_or_null, arg1, ..., argN] with argN on top, and an
+        // exact-args call binds the parameters in that order.
+        let param = |k: usize| -> Option<&PyObject> {
+            if k < effective {
+                Some(self.nth_value((effective - 1 - k) as u32))
+            } else {
+                None
+            }
+        };
+        match (plan.lhs, plan.rhs) {
+            (MicroOperand::Param(x), MicroOperand::Param(y)) => {
+                Self::bin_op_exact_fast(param(x)?, param(y)?, plan.op, vm)
+            }
+            (MicroOperand::Param(x), MicroOperand::SmallInt(v)) => {
+                // LOAD_SMALL_INT only ever carries 0..=255, all inside the
+                // context's pooled ints, so materializing it costs an index.
+                let small = vm.ctx.new_int(v as i32);
+                Self::bin_op_exact_fast(param(x)?, small.as_object(), plan.op, vm)
+            }
+            _ => None,
+        }
+    }
+
     fn bin_op_exact_fast(
         a: &PyObject,
         b: &PyObject,

@@ -476,6 +476,11 @@ pub struct PyCode {
     /// this code cannot leave the slot unbalanced, so `with_frame` skips the
     /// exc_info save/restore. Computed once by scanning the instruction stream.
     pub has_exc_handling: bool,
+    /// A body the call site can answer without building a frame at all, or
+    /// `None` when the body is anything else. Computed once here, next to
+    /// `has_exc_handling`, because the answer is a property of immutable
+    /// bytecode and every specialized call site wants it.
+    pub(crate) micro_plan: Option<MicroPlan>,
     /// Extra slots for `PyUnstable_Code_SetExtra`/`GetExtra` (CPython's
     /// `co_extra`). Values are opaque C pointers stored as `usize` so the
     /// struct stays `Send + Sync`; they are only ever handed back to the
@@ -489,6 +494,104 @@ impl Deref for PyCode {
     fn deref(&self) -> &Self::Target {
         &self.code
     }
+}
+
+/// A call body the interpreter can answer from the caller's own stack, without
+/// building the callee's frame: one arithmetic expression over the callee's
+/// parameters, then `RETURN_VALUE`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MicroPlan {
+    /// Positional parameters the body takes, including a method's `self`.
+    pub(crate) arity: u32,
+    pub(crate) op: rustpython_compiler_core::bytecode::BinaryOperator,
+    pub(crate) lhs: MicroOperand,
+    pub(crate) rhs: MicroOperand,
+}
+
+/// One operand of a [`MicroPlan`], read from the caller's argument slots.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum MicroOperand {
+    /// The k-th positional parameter; `self` counts as parameter 0.
+    Param(usize),
+    /// A small-int constant the peepholer folded into the sequence.
+    SmallInt(u32),
+}
+
+/// The executable unit at `idx`, with that instruction's inline cache units
+/// measured past, so a walk of the stream sees what the dispatch loop sees.
+/// Feeding the units in order to one [`OpArgState`] is also what makes an
+/// `EXTENDED_ARG` disqualify the body: it arrives as its own instruction.
+fn executable_unit(
+    code: &CodeObject,
+    state: &mut rustpython_compiler_core::bytecode::OpArgState,
+    idx: usize,
+) -> Option<(
+    rustpython_compiler_core::bytecode::Instruction,
+    rustpython_compiler_core::bytecode::OpArg,
+    usize,
+)> {
+    let unit = *code.instructions.get(idx)?;
+    let (op, arg) = state.get(unit);
+    Some((op, arg, idx + 1 + unit.op.cache_entries()))
+}
+
+/// The plan for a body the peepholer emits as `RESUME`, one fused load-and-operate
+/// superinstruction - `213` for a parameter/parameter pair, or `LOAD_FAST_BORROW`
+/// plus `212` for a parameter/small-int pair - whose retained `BINARY_OP` unit is
+/// still in place, then `RETURN_VALUE`.
+///
+/// Every other shape gets no plan and runs the normal frame path, and that is the
+/// whole safety argument: the accepted body does nothing but call
+/// `bin_op_exact_fast` on two values the caller already holds, and that helper
+/// answers `None` for any operand pair it would have to route through the generic
+/// protocol, so a shape that could raise, call a hook, or run reflected operator
+/// code never produces a value here. A docstring, a global or attribute read, a
+/// second operator, a jump, a closure body or an `EXTENDED_ARG` all fail this walk.
+fn micro_plan_of(code: &CodeObject) -> Option<MicroPlan> {
+    use rustpython_compiler_core::bytecode::{BinaryOperator, Instruction, Opcode, OpArgState};
+    // Generators, coroutines and `*args` bodies are excluded at the call site by
+    // `can_specialize_call` / `is_generator_like`, and a `yield` or a varargs
+    // collection breaks this walk anyway, so the plan needs no flag test of its own.
+    let mut state = OpArgState::default();
+    let (first, _, mut idx) = executable_unit(code, &mut state, 0)?;
+    if !matches!(first, Instruction::Resume { .. }) {
+        return None;
+    }
+    let (head, head_arg, next) = executable_unit(code, &mut state, idx)?;
+    idx = next;
+    let (lhs, rhs) = match head {
+        Instruction::LoadFastBorrowLoadFastBorrowBinaryOp { var_nums } => {
+            let (a, b) = var_nums.get(head_arg).indexes();
+            (MicroOperand::Param(a.as_usize()), MicroOperand::Param(b.as_usize()))
+        }
+        Instruction::LoadFastBorrow { var_num } => {
+            let a = var_num.get(head_arg).as_usize();
+            let (second, second_arg, second_next) = executable_unit(code, &mut state, idx)?;
+            match second {
+                Instruction::LoadSmallIntBinaryOp { i } => {
+                    idx = second_next;
+                    (MicroOperand::Param(a), MicroOperand::SmallInt(i.get(second_arg)))
+                }
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    // The retained `BINARY_OP` the fused head skips at runtime: its arg byte is
+    // the operator, exactly as the head's dispatch arm reads it.
+    let op_byte = code.instructions.read_arg(idx).as_u8();
+    let op = BinaryOperator::try_from(op_byte).ok()?;
+    let after_op = idx + 1 + Opcode::BinaryOp.cache_entries();
+    let (tail, _, _) = executable_unit(code, &mut state, after_op)?;
+    if !matches!(tail, Instruction::ReturnValue) {
+        return None;
+    }
+    Some(MicroPlan {
+        arity: code.arg_count,
+        op,
+        lhs,
+        rhs,
+    })
 }
 
 impl PyCode {
@@ -507,6 +610,7 @@ impl PyCode {
                     | Instruction::InstrumentedEndAsyncFor
             )
         });
+        let micro_plan = micro_plan_of(&code);
         Self {
             code,
             source_path: AtomicPtr::new(sp),
@@ -514,6 +618,7 @@ impl PyCode {
             monitoring_data: PyMutex::new(None),
             quickened: core::sync::atomic::AtomicBool::new(false),
             has_exc_handling,
+            micro_plan,
             co_extra: PyMutex::new(None),
         }
     }

@@ -38,6 +38,9 @@
 //!   `LUNA_STUB_BODY` to name the functions it may stub, like `stubcall` does
 //! * `argsslack` - size a call's drained argument vector by `collect()`'s growth
 //!   steps instead of by the exact argument count
+//! * `microinline` - build the callee's frame for every exact-args Python call,
+//!   instead of answering a call whose body is one arithmetic expression over its
+//!   own parameters from the caller's argument slots
 //!
 //! `LUNA_STUB_BODY=<qualname prefix>` is a second, complementary instrument: the
 //! matching functions answer `None` before their first instruction, and
@@ -123,6 +126,10 @@ pub(crate) const ARM_STAGE: u32 = 8388608;
 /// cannot see the iterator's length and so leaves capacity slack that a
 /// downstream tuple buffer pays a second allocation (and a free) to shrink.
 pub(crate) const ARGS_SLACK: u32 = 16777216;
+/// Answer an exact-args Python call whose body is a single arithmetic expression
+/// over its own parameters from the caller's argument slots, instead of building
+/// the callee's frame.
+pub(crate) const MICRO_INLINE: u32 = 33554432;
 
 /// Measurement only: the qualified-name prefix whose function bodies are
 /// skipped, so one call splits into "dispatch, argument binding, frame entry
@@ -184,6 +191,7 @@ pub(crate) fn ablated(bit: u32) -> bool {
                     "armguards" => ARM_GUARDS,
                     "armstage" => ARM_STAGE,
                     "argsslack" => ARGS_SLACK,
+                    "microinline" => MICRO_INLINE,
                     _ => 0,
                 };
             }
