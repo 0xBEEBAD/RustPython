@@ -843,6 +843,18 @@ impl Initializer for PyBaseException {
     type Args = FuncArgs;
 
     fn init(zelf: PyRef<Self>, args: Self::Args, vm: &VirtualMachine) -> PyResult<()> {
+        // `BaseException.__init__` is positional-only, and so is every subclass
+        // that does not define its own `__init__`: CPython answers
+        // `ValueError(x=1)` with the *called* class in the message, which is why
+        // the check sits here rather than in `slot_new` (where only BaseException
+        // itself is known) and why `Exception.__new__(Exception, x=1)` still
+        // succeeds. A subclass initializer that consumes its own keywords must
+        // hand the base a keyword-free `FuncArgs`, the way AttributeError,
+        // NameError and ImportError now do.
+        if !args.kwargs.is_empty() {
+            let name = zelf.class().name();
+            return Err(vm.new_type_error(format!("{}() takes no keyword arguments", name)));
+        }
         *zelf.args.write() = Some(PyTuple::new_ref(args.args, &vm.ctx));
         Ok(())
     }
@@ -2100,7 +2112,13 @@ pub(super) mod types {
             } else if let Some(dict) = zelf.dict() {
                 dict.del_item("name_from", vm).ok();
             }
-            PyBaseException::slot_init(zelf, args, vm)
+            // name/path/name_from are consumed and set above, and any other key
+            // was already rejected, so the base initializer must see no keywords
+            // at all: `ZipImportError('not a Zip file', path=path)` in
+            // Lib/zipimport.py is a legal ImportError call, and passing `args`
+            // through made the base reject it - which breaks the interpreter
+            // boot, because zipimport runs during encodings initialization.
+            PyBaseException::slot_init(zelf, FuncArgs::new(args.args, KwArgs::default()), vm)
         }
 
         fn init(_zelf: PyRef<Self>, _args: Self::Args, _vm: &VirtualMachine) -> PyResult<()> {
@@ -2415,7 +2433,15 @@ pub(super) mod types {
             if (3..=5).contains(&len) && has_filename {
                 new_args.args.truncate(2);
             }
-            PyBaseException::slot_init(zelf, new_args, vm)
+            // CPython's `OSError_init` returns before any keyword check when the
+            // class overrides `__new__` (`oserror_use_init`), so a Python-level
+            // `__new__` that consumed the keywords and then let this inherited
+            // initializer run must not have them reach the base:
+            // test_exception_hierarchy's `test_new_kwdargs` builds
+            // `SubOSErrorWithNew("some message", baz="baz")` that way.
+            // `slot_new` above already rejected OSError's own keywords.
+            let base_args = FuncArgs::new(new_args.args, KwArgs::default());
+            PyBaseException::slot_init(zelf, base_args, vm)
         }
 
         fn init(_zelf: PyRef<Self>, _args: Self::Args, _vm: &VirtualMachine) -> PyResult<()> {
