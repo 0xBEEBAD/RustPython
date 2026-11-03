@@ -961,6 +961,34 @@ impl PyType {
         Self::set_alloc(&self.slots, self.base.deref());
     }
 
+    /// Copy the inherited `__init__` into this type's own slot.
+    ///
+    /// `slots.init` holds only what a class defines itself, plus what
+    /// `SlotIdentifier::TpInit` copied from a base that *defined* the initializer
+    /// (types/slot_defs.rs), so a builtin exception subclass like `ValueError` -
+    /// whose initializer lives two levels up, on `BaseException` - keeps `None`
+    /// there. `type.__call__` reads its own slot and treats `None` as "this class
+    /// has no `__init__`", skipping `BaseException.__init__` for every such class;
+    /// CPython's `SimpleExtendsException` sets `tp_init` on each exception type, so
+    /// those constructors accept keyword arguments CPython rejects.
+    ///
+    /// Deliberately narrow: this is called for exception types only, because
+    /// filling it for every builtin would also start running `object.__init__`
+    /// where `type.__call__` currently skips it.
+    pub(crate) fn inherit_init_slot(&self) {
+        if self.slots.init.load().is_some() {
+            return;
+        }
+        let mut next = self.base.deref().map(|base| base.to_owned());
+        while let Some(cls) = next {
+            if let Some(init) = cls.slots.init.load() {
+                self.slots.init.store(Some(init));
+                return;
+            }
+            next = cls.base.deref().map(|base| base.to_owned());
+        }
+    }
+
     /// Recompute every slot for this type and all its descendants. update_all_slots
     ///
     /// Unlike `init_slots`, which is additive and driven only by the dunder names

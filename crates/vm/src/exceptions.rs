@@ -589,6 +589,11 @@ macro_rules! extend_exception {
         { $($name:expr => $value:expr),* $(,)* }
     ) => {
         $exc_struct::extend_class($ctx, $class);
+        // CPython's SimpleExtendsException gives every exception type its own
+        // `tp_init`; here the inherited initializer only reaches the class
+        // through this call, so that `type.__call__` runs it (see
+        // `PyType::inherit_init_slot`).
+        $class.inherit_init_slot();
         extend_class!($ctx, $class, {
             $($name => $value,)*
         });
@@ -2326,6 +2331,29 @@ pub(super) mod types {
         }
 
         fn slot_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+            // CPython rejects keywords for an OSError built through its own
+            // `__new__`, and defers argument parsing to the class's own
+            // `__init__` otherwise - `oserror_use_init`,
+            // Objects/exceptions.c:2183. The fork's equivalent of "this class
+            // still uses OSError's initializer" is a resolved init slot that
+            // matches OSError's own, which `extend_exception!` now fills for
+            // every subclass; a heap class that defines `__init__` keeps its own
+            // slot value, so its keywords belong to that initializer. The message
+            // names the called class, which is why it has to happen before the
+            // errno-to-subclass mapping below.
+            let defers_to_subclass_init = match (
+                cls.slots.init.load(),
+                vm.ctx.exceptions.os_error.slots.init.load(),
+            ) {
+                (Some(mine), Some(os_error_init)) => {
+                    crate::types::fn_addr(mine) != crate::types::fn_addr(os_error_init)
+                }
+                _ => false,
+            };
+            if !args.kwargs.is_empty() && !defers_to_subclass_init {
+                let name = cls.name();
+                return Err(vm.new_type_error(format!("{}() takes no keyword arguments", name)));
+            }
             // We need this method, because of how `CPython` copies `init`
             // from `BaseException` in `SimpleExtendsException` macro.
             // See: `BaseException_new`
