@@ -28,6 +28,10 @@ Lib/site-packages/*
 !Lib/site-packages/README.txt
 Lib/test/data/*
 !Lib/test/data/README
+# Same rule for the vendored interpreter library: these files are downloaded by
+# test_unicodedata / test_codecmaps_* at run time, not source.
+crates/pylib/Lib/test/data/*
+!crates/pylib/Lib/test/data/README
 cpython/
 .claude/
 docs/superpowers/
