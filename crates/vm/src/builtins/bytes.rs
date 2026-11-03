@@ -17,7 +17,7 @@ use crate::{
     convert::{ToPyObject, ToPyResult},
     function::{
         ArgBytesLike, ArgIndex, ArgIterable, Either, FuncArgs, OptionalArg, OptionalOption,
-        PyComparisonValue,
+        PyArithmeticValue, PyComparisonValue,
     },
     protocol::{
         BufferDescriptor, BufferMethods, PyBuffer, PyIterReturn, PyMappingMethods, PyNumberMethods,
@@ -242,8 +242,16 @@ impl PyBytes {
         Ok(vm.ctx.new_str(zelf.inner.repr_bytes(vm)?))
     }
 
-    fn __add__(&self, other: ArgBytesLike) -> Vec<u8> {
-        self.inner.add(&other.borrow_buf())
+    fn __add__(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyArithmeticValue<Vec<u8>> {
+        // NotImplemented rather than a TypeError, because CPython's bytes has no
+        // `nb_add`: its `+` is answered by the `sq_concat` slot below, which
+        // `PyNumber_Add` only reaches after the right operand's `__radd__` has
+        // declined. Raising here would hide that chance.
+        PyArithmeticValue::from_option(
+            ArgBytesLike::try_from_borrowed_object(vm, &other)
+                .ok()
+                .map(|buffer| self.inner.add(&buffer.borrow_buf())),
+        )
     }
 
     fn __contains__(
@@ -657,7 +665,7 @@ impl AsSequence for PyBytes {
             concat: atomic_func!(|seq, other, vm| {
                 PyBytes::sequence_downcast(seq)
                     .inner
-                    .concat(other, vm)
+                    .concat(other, seq.obj, vm)
                     .map(|x| vm.ctx.new_bytes(x).into())
             }),
             repeat: atomic_func!(|seq, n, vm| {

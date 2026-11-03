@@ -476,6 +476,31 @@ impl VirtualMachine {
         ))
     }
 
+    /// `str`, `list` and `tuple` word a rejected concatenation by naming the
+    /// type they accept, not the operands' classes, so a subclass of any of
+    /// them still reports its base name - CPython hardcodes the name in each
+    /// `sq_concat` slot. The operand that was rejected is quoted with double
+    /// quotes, unlike most of these messages.
+    pub fn new_concat_error(&self, name: &str, other: &PyObject) -> PyBaseExceptionRef {
+        self.new_type_error(format!(
+            r#"can only concatenate {name} (not "{}") to {name}"#,
+            other.class().name()
+        ))
+    }
+
+    /// The bytes family words the same rejection the other way round and names
+    /// the left operand's own class, so a `bytes` subclass reports its name.
+    pub fn new_bytes_concat_error(
+        &self,
+        other: &PyObject,
+        left_name: &str,
+    ) -> PyBaseExceptionRef {
+        self.new_type_error(format!(
+            "can't concat {} to {left_name}",
+            other.class().name()
+        ))
+    }
+
     pub fn new_unsupported_ternary_op_error(
         &self,
         a: &PyObject,

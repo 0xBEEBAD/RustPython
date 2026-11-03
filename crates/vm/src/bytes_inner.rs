@@ -973,8 +973,16 @@ impl PyBytesInner {
         self.elements.imul(vm, n)
     }
 
-    pub fn concat(&self, other: &PyObject, vm: &VirtualMachine) -> PyResult<Vec<u8>> {
-        let buffer = PyBuffer::try_from_borrowed_object(vm, other)?;
+    pub fn concat(&self, other: &PyObject, left: &PyObject, vm: &VirtualMachine) -> PyResult<Vec<u8>> {
+        // The bytes family words a rejected operand by naming both operands,
+        // not by describing a protocol: PyBuffer's own "a bytes-like object is
+        // required" message belongs to the write paths (io, memoryio), where
+        // CPython really does use that wording, so the substitution happens at
+        // this caller rather than inside the conversion. The left class name is
+        // only read on that path, because a heap type's name is lock-guarded.
+        let buffer = PyBuffer::try_from_borrowed_object(vm, other).map_err(|_| {
+            vm.new_bytes_concat_error(other, &left.class().name())
+        })?;
         let borrowed = buffer.as_contiguous();
         if let Some(other) = borrowed {
             let mut v = Vec::with_capacity(self.elements.len() + other.len());

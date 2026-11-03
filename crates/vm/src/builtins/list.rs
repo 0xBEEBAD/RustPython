@@ -241,14 +241,13 @@ impl PyList {
         elements.insert(position, element);
     }
 
+    /// `list + list`, and the answer for a rejected operand. CPython words the
+    /// rejection here, in the `sq_concat` slot, naming the type a list joins
+    /// with rather than the pair of operands.
     fn concat(&self, other: &PyObject, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
-        let other = other.downcast_ref::<Self>().ok_or_else(|| {
-            vm.new_type_error(format!(
-                "Cannot add {} and {}",
-                Self::class(&vm.ctx).name(),
-                other.class().name()
-            ))
-        })?;
+        let other = other
+            .downcast_ref::<Self>()
+            .ok_or_else(|| vm.new_concat_error("list", other))?;
         let mut elements = self.borrow_vec().to_vec();
         elements.extend(other.borrow_vec().iter().cloned());
         Ok(Self::from(elements).into_ref(&vm.ctx))

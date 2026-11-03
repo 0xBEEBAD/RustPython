@@ -550,10 +550,9 @@ impl AsSequence for PyTuple {
                 let zelf = PyTuple::sequence_downcast(seq);
                 match PyTuple::__add__(zelf.to_owned(), other.to_owned(), vm) {
                     PyArithmeticValue::Implemented(tuple) => Ok(tuple.into()),
-                    PyArithmeticValue::NotImplemented => Err(vm.new_type_error(format!(
-                        "can only concatenate tuple (not '{}') to tuple",
-                        other.class().name()
-                    ))),
+                    PyArithmeticValue::NotImplemented => {
+                        Err(vm.new_concat_error("tuple", other))
+                    }
                 }
             }),
             repeat: atomic_func!(|seq, n, vm| {

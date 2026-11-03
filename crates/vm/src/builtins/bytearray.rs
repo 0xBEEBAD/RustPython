@@ -4,8 +4,8 @@ use super::{
     PyTupleRef, PyType, PyTypeRef, iter::builtins_iter,
 };
 use crate::{
-    AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, TryFromObject,
-    VirtualMachine,
+    AsObject, Context, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult,
+    TryFromBorrowedObject, TryFromObject, VirtualMachine,
     anystr::{self, AnyStr},
     atomic_func,
     byte::{bytes_from_object, value_from_object},
@@ -23,7 +23,8 @@ use crate::{
     },
     convert::{ToPyObject, ToPyResult},
     function::{
-        ArgBytesLike, ArgIterable, ArgSize, Either, OptionalArg, OptionalOption, PyComparisonValue,
+        ArgBytesLike, ArgIterable, ArgSize, Either, OptionalArg, OptionalOption, PyArithmeticValue,
+        PyComparisonValue,
     },
     protocol::{
         BufferDescriptor, BufferMethods, BufferResizeGuard, PyBuffer, PyIterReturn,
@@ -226,8 +227,17 @@ impl PyByteArray {
         Ok(vm.ctx.new_str(repr))
     }
 
-    fn __add__(&self, other: ArgBytesLike) -> Self {
-        self.inner().add(&other.borrow_buf()).into()
+    fn __add__(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyArithmeticValue<Self> {
+        // NotImplemented rather than a TypeError: CPython's bytearray has no
+        // `nb_add`, so `+` is answered by its `sq_concat` slot, which the
+        // interpreter only reaches once the right operand's `__radd__` has
+        // declined. `+=` keeps raising, because CPython's in-place add does not
+        // give the right operand that chance.
+        PyArithmeticValue::from_option(
+            ArgBytesLike::try_from_borrowed_object(vm, &other)
+                .ok()
+                .map(|buffer| self.inner().add(&buffer.borrow_buf()).into()),
+        )
     }
 
     fn __contains__(
@@ -240,12 +250,24 @@ impl PyByteArray {
 
     fn __iadd__(
         zelf: PyRef<Self>,
-        other: ArgBytesLike,
+        other: PyObjectRef,
         vm: &VirtualMachine,
     ) -> PyResult<PyRef<Self>> {
+        // `+=` raises rather than yielding NotImplemented, because CPython's
+        // in-place add never gives the right operand the chance to answer; the
+        // bytes wording is therefore this slot's to produce, and the
+        // `sq_inplace_concat` slot below routes through it rather than
+        // converting the operand a second time.
+        let buffer = match ArgBytesLike::try_from_borrowed_object(vm, &other) {
+            Ok(buffer) => buffer,
+            Err(_) => {
+                let class_name = zelf.class().name();
+                return Err(vm.new_bytes_concat_error(&other, &class_name));
+            }
+        };
         zelf.try_resizable(vm)?
             .elements
-            .extend(&*other.borrow_buf());
+            .extend(&*buffer.borrow_buf());
         Ok(zelf)
     }
 
@@ -780,7 +802,7 @@ impl AsSequence for PyByteArray {
             concat: atomic_func!(|seq, other, vm| {
                 PyByteArray::sequence_downcast(seq)
                     .inner()
-                    .concat(other, vm)
+                    .concat(other, seq.obj, vm)
                     .map(|x| PyByteArray::from(x).into_pyobject(vm))
             }),
             repeat: atomic_func!(|seq, n, vm| {
@@ -808,9 +830,8 @@ impl AsSequence for PyByteArray {
                 PyByteArray::sequence_downcast(seq).__contains__(other, vm)
             }),
             inplace_concat: atomic_func!(|seq, other, vm| {
-                let other = ArgBytesLike::try_from_object(vm, other.to_owned())?;
                 let zelf = PyByteArray::sequence_downcast(seq).to_owned();
-                PyByteArray::__iadd__(zelf, other, vm).map(|x| x.into())
+                PyByteArray::__iadd__(zelf, other.to_owned(), vm).map(|x| x.into())
             }),
             inplace_repeat: atomic_func!(|seq, n, vm| {
                 let zelf = PyByteArray::sequence_downcast(seq).to_owned();

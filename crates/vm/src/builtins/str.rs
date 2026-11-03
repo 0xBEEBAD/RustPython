@@ -767,12 +767,19 @@ impl PyStr {
             .to_pyobject(vm))
         } else if let Some(radd) = vm.get_method(other.clone(), identifier!(vm, __radd__)) {
             // hack to get around not distinguishing number add from seq concat
-            radd?.call((zelf,), vm)
+            let result = radd?.call((zelf,), vm)?;
+            // A reflected answer that declines is the end of the road, not a
+            // verdict to pass upward: `str` owns this wording in both orders,
+            // because CPython's `str.__add__` *is* `unicode_concat`, which is
+            // also the `sq_concat` slot the interpreter falls back to. Returning
+            // NotImplemented here would leak it out of `str.__add__(...)`.
+            if result.is(&vm.ctx.not_implemented()) {
+                Err(vm.new_concat_error("str", &other))
+            } else {
+                Ok(result)
+            }
         } else {
-            Err(vm.new_type_error(format!(
-                r#"can only concatenate str (not "{}") to str"#,
-                other.class().name()
-            )))
+            Err(vm.new_concat_error("str", &other))
         }
     }
 
