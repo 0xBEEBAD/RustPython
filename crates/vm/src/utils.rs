@@ -56,6 +56,17 @@ pub(crate) fn current_call_self_offset() -> usize {
     CURRENT_CALL_SELF_OFFSET.with(|c| c.get())
 }
 
+/// Like [`current_call_name`] but with the class prefix CPython uses in
+/// `f() takes no keyword arguments` (`str.count()`, not `count()`).
+pub(crate) fn current_call_qualified_name(vm: &VirtualMachine) -> Option<String> {
+    match CURRENT_CALL.with(|c| c.get()) {
+        CallContext::None => None,
+        // SAFETY: the pointer was installed by `with_call_context`, whose
+        // borrow of the callable stays live until the call returns.
+        CallContext::Obj(obj) => unsafe { crate::protocol::callable_qualified_name(&*obj, vm) },
+    }
+}
+
 /// Sets the call context for the duration of `f` and restores the previous
 /// values afterwards (nested builtin calls override and then restore).
 ///

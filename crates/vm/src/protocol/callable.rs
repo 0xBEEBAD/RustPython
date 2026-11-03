@@ -284,6 +284,23 @@ pub(crate) fn callable_display_name(obj: &PyObject, vm: &VirtualMachine) -> Opti
     None
 }
 
+/// The name CPython puts in front of `takes no keyword arguments`.
+///
+/// That message and `got an unexpected keyword argument` are built by different
+/// paths in CPython's argument parser, and only the first one uses the
+/// qualified name: `str.count(overlapping=True)` says
+/// `str.count() takes no keyword arguments` while `str.split(maxsplt=1)` says
+/// `split() got an unexpected keyword argument 'maxsplt'`. A method descriptor
+/// is the case the two disagree on, because `callable_display_name` reports it
+/// bare; everything else already carries the class (`dict.get` for a bound
+/// builtin) or has none to carry (a builtin function like `len`).
+pub(crate) fn callable_qualified_name(obj: &PyObject, vm: &VirtualMachine) -> Option<String> {
+    if let Some(md) = obj.downcast_ref::<PyMethodDescriptor>() {
+        return Some(format!("{}.{}", md.common.typ.name(), md.method.name));
+    }
+    callable_display_name(obj, vm)
+}
+
 /// Trace events for sys.settrace and sys.setprofile.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum TraceEvent {

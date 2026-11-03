@@ -374,11 +374,9 @@ impl FuncArgs {
                 // Only checked on binding failure so manual FromArgs impls
                 // that consume kwargs but report no parameters are untouched.
                 if !self.kwargs.is_empty() && T::parameters().is_empty() {
-                    let display = crate::utils::current_call_name(vm).unwrap_or_default();
-                    return vm.new_type_error(format!(
-                        "{}() takes no keyword arguments",
-                        display
-                    ));
+                    let display = crate::utils::current_call_qualified_name(vm).unwrap_or_default();
+                    return vm
+                        .new_type_error(format!("{}() takes no keyword arguments", display));
                 }
                 e.into_exception(T::arity(), given_args, vm)
             })?;
@@ -406,13 +404,16 @@ impl FuncArgs {
         if self.kwargs.is_empty() {
             return None;
         }
-        let display = crate::utils::current_call_name(vm).unwrap_or_default();
-        // No keyword parameters at all: `f() takes no keyword arguments`.
+        // No keyword parameters at all: `f() takes no keyword arguments`, with
+        // the qualified name (`str.count()`), unlike the unexpected-keyword
+        // message below that stays bare (`split()`).
         if parameters.is_empty() {
             return self.kwargs.keys().next().map(|_| {
-                vm.new_type_error(format!("{}() takes no keyword arguments", display))
+                let qualified = crate::utils::current_call_qualified_name(vm).unwrap_or_default();
+                vm.new_type_error(format!("{}() takes no keyword arguments", qualified))
             });
         }
+        let display = crate::utils::current_call_name(vm).unwrap_or_default();
         // Exactly one unexpected keyword: `f() got an unexpected keyword
         // argument 'X'` (plus "Did you mean" when close to a valid name).
         // Non-str keys (e.g. BadStr) report "invalid keyword argument for f()".
