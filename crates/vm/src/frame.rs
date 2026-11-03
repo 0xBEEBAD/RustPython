@@ -2578,7 +2578,7 @@ fn specialization_compact_int_value(i: &PyInt, vm: &VirtualMachine) -> Option<is
     // _PyLong_IsCompact(): a one-digit PyLong (base 2^30),
     // i.e. abs(value) <= 2^30 - 1.
     const CPYTHON_COMPACT_LONG_ABS_MAX: i64 = (1i64 << 30) - 1;
-    let v = i.try_to_primitive::<i64>(vm).ok()?;
+    let v = ExecutingFrame::compact_i64(i.as_bigint())?;
     if (-CPYTHON_COMPACT_LONG_ABS_MAX..=CPYTHON_COMPACT_LONG_ABS_MAX).contains(&v) {
         Some(v as isize)
     } else {
@@ -2763,7 +2763,7 @@ fn slice_bound_isize(obj: &PyObjectRef, vm: &VirtualMachine) -> Option<Option<is
         return Some(None);
     }
     obj.downcast_ref_if_exact::<PyInt>(vm)
-        .and_then(|i| i.as_bigint().to_isize())
+        .and_then(|i| ExecutingFrame::compact_isize(i))
         .map(Some)
 }
 
@@ -2775,7 +2775,7 @@ fn slice_bound_isize_ref(obj: &PyObject, vm: &VirtualMachine) -> Option<Option<i
         return Some(None);
     }
     obj.downcast_ref_if_exact::<PyInt>(vm)
-        .and_then(|i| i.as_bigint().to_isize())
+        .and_then(|i| ExecutingFrame::compact_isize(i))
         .map(Some)
 }
 
@@ -2795,7 +2795,7 @@ fn exact_subscript(
     use num_traits::ToPrimitive;
     if let Some(index) = key
         .downcast_ref_if_exact::<PyInt>(vm)
-        .and_then(|i| i.as_bigint().to_isize())
+        .and_then(|i| ExecutingFrame::compact_isize(i))
     {
         let element = if let Some(list) = container.downcast_ref_if_exact::<PyList>(vm) {
             let items = list.borrow_vec();
@@ -10145,6 +10145,14 @@ impl ExecutingFrame<'_> {
         }
     }
 
+    /// The `isize` of a one-limb int, for the slice-bound and subscript fast
+    /// paths that otherwise run the general `to_isize` conversion. `None` means
+    /// "use the general path", which is also what a non-fitting value gives.
+    #[inline]
+    fn compact_isize(i: &PyInt) -> Option<isize> {
+        isize::try_from(Self::compact_i64(i.as_bigint())?).ok()
+    }
+
     fn int_fast_op(
         a: &BigInt,
         b: &BigInt,
@@ -10191,7 +10199,9 @@ impl ExecutingFrame<'_> {
         compute: fn(i64, i64) -> Option<i64>,
     ) -> Option<PyObjectRef> {
         use num_traits::ToPrimitive;
-        let (av, bv) = (a.to_i64()?, b.to_i64()?);
+        let (Some(av), Some(bv)) = (Self::compact_i64(a), Self::compact_i64(b)) else {
+            return None;
+        };
         compute(av, bv).map(|r| vm.ctx.new_int(r).into())
     }
 
