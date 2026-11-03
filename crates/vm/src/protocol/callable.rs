@@ -301,6 +301,34 @@ pub(crate) fn callable_qualified_name(obj: &PyObject, vm: &VirtualMachine) -> Op
     callable_display_name(obj, vm)
 }
 
+/// The name CPython puts in front of the keyword rejections *other* than
+/// `takes no keyword arguments`: `got an unexpected keyword argument`,
+/// `invalid keyword argument for X()` and `takes at most N keyword arguments`.
+///
+/// Argument Clinic hands each function's own short name to those errors, so a
+/// bound builtin method is named without its class. The fork already prints it
+/// that way on the literal-keyword route, because the callee there is the method
+/// descriptor; the `**kwargs` route (CALL_FUNCTION_EX) instead carries a bound
+/// method object and produced the dotted name, so one call reported two
+/// different names depending on how it was written:
+/// `'a'.split(maxsplt=1)` said `split()` while
+/// `'a'.split(**{'maxsplt': 1})` said `str.split()`. CPython 3.14.7 says
+/// `split()` for both, and this is what makes the second one agree.
+///
+/// Arity messages must NOT use this: `_PyArg_CheckPositional` prints the full
+/// name, and `math.floor()` is measured to keep its module prefix there.
+pub(crate) fn callable_bare_name(obj: &PyObject, vm: &VirtualMachine) -> Option<String> {
+    if let Some(f) = obj.downcast_ref::<PyNativeFunction>() {
+        return Some(f.value.name.to_owned());
+    }
+    if let Some(bm) = obj.downcast_ref::<PyBoundMethod>()
+        && let Some(f) = bm.function_obj().downcast_ref::<PyNativeFunction>()
+    {
+        return Some(f.value.name.to_owned());
+    }
+    callable_display_name(obj, vm)
+}
+
 /// Trace events for sys.settrace and sys.setprofile.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum TraceEvent {

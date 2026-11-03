@@ -13,6 +13,7 @@ pub use buffer::{
 pub(crate) use buffer::CExportedBuffer;
 pub use callable::PyCallable;
 pub(crate) use callable::TraceEvent;
+pub(crate) use callable::callable_bare_name;
 pub(crate) use callable::callable_display_name;
 pub(crate) use callable::callable_qualified_name;
 pub use iter::{PyIter, PyIterIter, PyIterReturn};

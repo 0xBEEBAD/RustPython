@@ -311,7 +311,7 @@ impl FuncArgs {
         // keys (open(file, encoding=...)) take the normal binding path and
         // let from_args/check_kwargs_empty handle the leftovers.
         if !T::parameters().is_empty() && !self.kwargs.is_empty() {
-            let display = crate::utils::current_call_name(vm).unwrap_or_default();
+            let display = crate::utils::current_call_bare_name(vm).unwrap_or_default();
             let all_keys_unknown = self.kwargs.keys().all(|k| match k.as_str() {
                 Ok(s) => !T::parameters().contains(&s),
                 Err(_) => true,
@@ -413,7 +413,7 @@ impl FuncArgs {
                 vm.new_type_error(format!("{}() takes no keyword arguments", qualified))
             });
         }
-        let display = crate::utils::current_call_name(vm).unwrap_or_default();
+        let display = crate::utils::current_call_bare_name(vm).unwrap_or_default();
         // Exactly one unexpected keyword: `f() got an unexpected keyword
         // argument 'X'` (plus "Did you mean" when close to a valid name).
         // Non-str keys (e.g. BadStr) report "invalid keyword argument for f()".

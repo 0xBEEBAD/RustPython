@@ -67,6 +67,18 @@ pub(crate) fn current_call_qualified_name(vm: &VirtualMachine) -> Option<String>
     }
 }
 
+/// The name for the keyword rejections that CPython spells without the class
+/// prefix, even for a bound builtin method (`split() got an unexpected keyword
+/// argument 'maxsplt'`). See [`crate::protocol::callable_bare_name`].
+pub(crate) fn current_call_bare_name(vm: &VirtualMachine) -> Option<String> {
+    match CURRENT_CALL.with(|c| c.get()) {
+        CallContext::None => None,
+        // SAFETY: the pointer was installed by `with_call_context`, whose
+        // borrow of the callable stays live until the call returns.
+        CallContext::Obj(obj) => unsafe { crate::protocol::callable_bare_name(&*obj, vm) },
+    }
+}
+
 /// Sets the call context for the duration of `f` and restores the previous
 /// values afterwards (nested builtin calls override and then restore).
 ///
