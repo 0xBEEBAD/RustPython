@@ -171,7 +171,12 @@ mod gc {
 
     /// Return the list of objects directly referred to by any of the arguments.
     #[pyfunction]
-    fn get_referents(args: FuncArgs, vm: &VirtualMachine) -> PyListRef {
+    fn get_referents(args: FuncArgs, vm: &VirtualMachine) -> PyResult<PyListRef> {
+        // `*objects` only: CPython's ml_name is "gc.get_referents" and the
+        // function takes no keyword parameters.
+        if let Some(err) = args.reject_keywords("gc.get_referents", vm) {
+            return Err(err);
+        }
         let mut result = Vec::new();
 
         for obj in args.args {
@@ -179,12 +184,15 @@ mod gc {
             result.extend(obj.gc_get_referents());
         }
 
-        vm.ctx.new_list(result)
+        Ok(vm.ctx.new_list(result))
     }
 
     /// Return the list of objects that directly refer to any of the arguments.
     #[pyfunction]
-    fn get_referrers(args: FuncArgs, vm: &VirtualMachine) -> PyListRef {
+    fn get_referrers(args: FuncArgs, vm: &VirtualMachine) -> PyResult<PyListRef> {
+        if let Some(err) = args.reject_keywords("gc.get_referrers", vm) {
+            return Err(err);
+        }
         use std::collections::HashSet;
 
         // Build a set of target object pointers for fast lookup
@@ -206,7 +214,7 @@ mod gc {
         });
 
         let result = gc_state::gc_state().get_referrers(&targets, &stack_frames);
-        vm.ctx.new_list(result)
+        Ok(vm.ctx.new_list(result))
     }
 
     /// Return True if the object is tracked by the garbage collector.

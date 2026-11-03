@@ -88,6 +88,27 @@ unsafe impl Traverse for FuncArgs {
     }
 }
 
+impl FuncArgs {
+    /// Reject the keyword half for a callable that has no keyword parameters at
+    /// all, which is CPython's `chain() takes no keyword arguments`.
+    ///
+    /// A hand-written `__new__` (or a `#[pyfunction]`) that reads `self.args` and
+    /// ignores `self.kwargs` cannot produce this error by accident, because the
+    /// binder is never consulted: `itertools.chain(zzzq=1)` just built a chain.
+    /// `check_kwargs_empty` is the same rule for callables that *do* declare a
+    /// signature, and it is the reason no other builtin needs this call.
+    pub(crate) fn reject_keywords(
+        &self,
+        name: &str,
+        vm: &VirtualMachine,
+    ) -> Option<PyBaseExceptionRef> {
+        self.kwargs
+            .keys()
+            .next()
+            .map(|_| vm.new_type_error(format!("{name}() takes no keyword arguments")))
+    }
+}
+
 /// Conversion from vector of python objects to function arguments.
 impl<A> From<A> for FuncArgs
 where

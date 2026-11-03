@@ -36,6 +36,11 @@ mod decl {
     impl PyItertoolsChain {
         #[pyslot]
         fn slot_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
+            // CPython's chain has no keyword parameters: it reads only the
+            // positional half here, so the keywords have to be refused first.
+            if let Some(err) = args.reject_keywords(&cls.name(), vm) {
+                return Err(err);
+            }
             let args_list = PyList::from(args.args);
             Self {
                 source: PyRwLock::new(Some(args_list.to_pyobject(vm).get_iter(vm)?)),
