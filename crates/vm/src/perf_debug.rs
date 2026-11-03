@@ -36,6 +36,8 @@
 //! * `armstage` - consume the caller's argument slots and answer `None` without
 //!   building the callee frame, to price the staging loop and kernel entry; needs
 //!   `LUNA_STUB_BODY` to name the functions it may stub, like `stubcall` does
+//! * `argsslack` - size a call's drained argument vector by `collect()`'s growth
+//!   steps instead of by the exact argument count
 //!
 //! `LUNA_STUB_BODY=<qualname prefix>` is a second, complementary instrument: the
 //! matching functions answer `None` before their first instruction, and
@@ -117,6 +119,10 @@ pub(crate) const ARM_GUARDS: u32 = 4194304;
 /// `stubcall` it applies only to the functions `LUNA_STUB_BODY` names, since a
 /// callee that never runs cannot produce the objects the interpreter boots on.
 pub(crate) const ARM_STAGE: u32 = 8388608;
+/// Drain call arguments out of the frame stack with `collect()` again, which
+/// cannot see the iterator's length and so leaves capacity slack that a
+/// downstream tuple buffer pays a second allocation (and a free) to shrink.
+pub(crate) const ARGS_SLACK: u32 = 16777216;
 
 /// Measurement only: the qualified-name prefix whose function bodies are
 /// skipped, so one call splits into "dispatch, argument binding, frame entry
@@ -177,6 +183,7 @@ pub(crate) fn ablated(bit: u32) -> bool {
                     "defbind" => DEF_BIND,
                     "armguards" => ARM_GUARDS,
                     "armstage" => ARM_STAGE,
+                    "argsslack" => ARGS_SLACK,
                     _ => 0,
                 };
             }

@@ -7351,7 +7351,7 @@ impl ExecutingFrame<'_> {
                     // Drain the positional args, then prepend self_or_null (if
                     // any). A zero-argument call (`object()`, `set()`, ...) ends
                     // up with `Vec::new()` here, i.e. no allocation at all.
-                    let args: Vec<PyObjectRef> = self.pop_multiple(nargs_usize).collect();
+                    let args: Vec<PyObjectRef> = self.pop_multiple_vec(nargs_usize);
                     let self_or_null = self.pop_value_opt();
                     let callable = self.pop_value();
                     let self_is_some = self_or_null.is_some();
@@ -7595,7 +7595,7 @@ impl ExecutingFrame<'_> {
                     None
                 };
                 if let Some(cls) = exc_cls {
-                    let args: Vec<PyObjectRef> = self.pop_multiple(nargs_usize).collect();
+                    let args: Vec<PyObjectRef> = self.pop_multiple_vec(nargs_usize);
                     let _ = self.pop_value_opt(); // self_or_null (null)
                     let _ = self.pop_value(); // callable
                     let exc =
@@ -9081,7 +9081,7 @@ impl ExecutingFrame<'_> {
 
     fn collect_positional_args(&mut self, nargs: u32) -> FuncArgs {
         FuncArgs {
-            args: self.pop_multiple(nargs as usize).collect(),
+            args: self.pop_multiple_vec(nargs as usize),
             ..Default::default()
         }
     }
@@ -13149,6 +13149,26 @@ impl ExecutingFrame<'_> {
                 crate::exceptions::prep_reraise_star(arg1, arg2, vm)
             }
         }
+    }
+
+    /// Drain `count` stack entries into a vector sized exactly to them.
+    ///
+    /// `collect()` cannot see `TrustedLen` through the `impl ExactSizeIterator`
+    /// that `pop_multiple` returns, so it takes std's untrusted path: capacity
+    /// grows 4, 8, 16... and a 1-3 entry call leaves slack. Almost every one of
+    /// these vectors is moved into a `PyTuple` element buffer or a `FuncArgs`,
+    /// where `into_boxed_slice` shrink-reallocates the slack - one extra heap
+    /// block allocated *and* freed per exception built with arguments. Reserving
+    /// the exact count makes that conversion free. Ablating `argsslack` restores
+    /// the collect so the difference can be measured inside one binary.
+    #[inline]
+    fn pop_multiple_vec(&mut self, count: usize) -> Vec<PyObjectRef> {
+        if crate::perf_debug::ablated(crate::perf_debug::ARGS_SLACK) {
+            return self.pop_multiple(count).collect();
+        }
+        let mut values = Vec::with_capacity(count);
+        values.extend(self.pop_multiple(count));
+        values
     }
 
     /// Pop multiple values from the stack. Panics if any slot is NULL.
