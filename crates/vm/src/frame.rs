@@ -387,17 +387,25 @@ impl LocalsPlus {
         Some(base)
     }
 
-    /// Create a new heap-backed LocalsPlus that is a clone of the
-    /// fastlocals portion of this one.  Stack slots are NOT copied
-    /// (stack_top = 0, stacksize = 0).
+    /// Create a new heap-backed LocalsPlus that is a copy of this one: the
+    /// fastlocals plus the live eval-stack slots, each held as an owned
+    /// reference.
+    ///
+    /// The stack belongs to the frame's state, so a materialized frame keeps it
+    /// alive the way CPython's `_PyFrame_Copy` does. Without it the fastlocal
+    /// slot is the only owner of a value that was still on the stack when the
+    /// frame raised, and an `f_locals` write on a traceback frame would drop
+    /// the last reference and finalize the object while the traceback still
+    /// shows it.
     ///
     /// # Safety
     /// The caller must ensure that `self.fastlocals()` is a valid slice
     /// (backing storage is alive, not concurrently mutated).
     pub(crate) unsafe fn snapshot_to_heap(&self) -> Self {
         let n = self.nlocalsplus as usize;
+        let top = self.stack_top as usize;
         let src = self.fastlocals();
-        let mut data = vec![0usize; n];
+        let mut data = vec![0usize; n + top];
         // Clone each Option<PyObjectRef> into the heap buffer.
         for (i, slot) in src.iter().enumerate() {
             if let Some(obj) = slot {
@@ -407,10 +415,19 @@ impl LocalsPlus {
                 core::mem::forget(cloned);
             }
         }
+        // The copied stack entries are all owned, including the ones that were
+        // borrowed on the source stack: the frame they came from is going away,
+        // so the snapshot has to keep them alive by itself.
+        for (j, entry) in self.stack_as_slice().iter().enumerate() {
+            let owned: Option<PyObjectRef> = entry.as_ref().map(|sr| sr.as_object().to_owned());
+            // SAFETY: Option<PyObjectRef> has the same layout as usize.
+            data[n + j] = unsafe { core::mem::transmute_copy(&owned) };
+            core::mem::forget(owned);
+        }
         Self {
             data: LocalsPlusData::Heap(data.into_boxed_slice()),
             nlocalsplus: self.nlocalsplus,
-            stack_top: 0,
+            stack_top: self.stack_top,
         }
     }
 
