@@ -15773,11 +15773,8 @@ def f(sys):
 "#,
         );
         let f = find_code(&code, "f").expect("missing f code");
-        let ops = f
-            .instructions
-            .iter()
-            .filter(|unit| !matches!(unit.op, Instruction::Cache))
-            .collect::<Vec<_>>();
+        let shape_units = cpython_shape(f);
+        let ops: Vec<_> = shape_units.iter().collect();
         let depth_load = ops
             .windows(3)
             .find(|window| {
@@ -18052,6 +18049,102 @@ def f(a, b, c):
         code.instructions
             .iter()
             .filter(|unit| !matches!(unit.op, Instruction::Cache))
+    }
+
+    /// `code`'s instructions, cache slots dropped, spelled the way CPython
+    /// writes the same code.
+    ///
+    /// The borrow pass folds a `LOAD_FAST_BORROW_LOAD_FAST_BORROW` or a
+    /// `LOAD_SMALL_INT` into one instruction together with the `BINARY_OP` or
+    /// `COMPARE_OP` that consumes it, but it keeps that operator unit in place
+    /// for the fused instruction to read and skip at runtime. Only the load's
+    /// opcode moves, so renaming it back reproduces CPython's stream unit for
+    /// unit: a shape test can then assert the sequence CPython emits without
+    /// tracking which loads happened to fuse, and a load CPython keeps strong
+    /// still reads strong here.
+    fn cpython_shape(code: &CodeObject) -> Vec<CodeUnit> {
+        non_cache_instructions(code)
+            .map(|unit| match unit.op {
+                Instruction::LoadSmallIntBinaryOp { i }
+                | Instruction::LoadSmallIntCompareOp { i } => CodeUnit {
+                    op: Instruction::LoadSmallInt { i },
+                    arg: unit.arg,
+                },
+                Instruction::LoadFastBorrowLoadFastBorrowBinaryOp { var_nums }
+                | Instruction::LoadFastBorrowLoadFastBorrowCompareOp { var_nums } => CodeUnit {
+                    op: Instruction::LoadFastBorrowLoadFastBorrow { var_nums },
+                    arg: unit.arg,
+                },
+                _ => *unit,
+            })
+            .collect()
+    }
+
+    /// [`cpython_shape`] without the arg bytes, for a test that slice-matches
+    /// whole windows of opcodes.
+    fn cpython_shape_ops(code: &CodeObject) -> Vec<Instruction> {
+        cpython_shape(code)
+            .into_iter()
+            .map(|unit| unit.op)
+            .collect()
+    }
+
+    #[test]
+    fn cpython_shape_unfuses_the_load_operator_fusions() {
+        let code = compile_exec(
+            "\
+def f(a, b):
+    while a < b:
+        a += 1
+    return a
+",
+        );
+        let f = find_code(&code, "f").expect("missing function code");
+        let raw: Vec<_> = non_cache_instructions(f).collect();
+        assert!(
+            raw.iter().any(|unit| matches!(
+                unit.op,
+                Instruction::LoadFastBorrowLoadFastBorrowCompareOp { .. }
+                    | Instruction::LoadSmallIntBinaryOp { .. }
+            )),
+            "expected the fusion pass to fold a load into its operator, got {raw:?}"
+        );
+
+        let shape = cpython_shape(f);
+        assert_eq!(
+            shape.len(),
+            raw.len(),
+            "unfusing must reproduce the stream unit for unit"
+        );
+        for (unfolded, fused) in shape.iter().zip(&raw) {
+            assert_eq!(
+                u8::from(unfolded.arg),
+                u8::from(fused.arg),
+                "unfusing changed the arg byte at {unfolded:?} / {fused:?}"
+            );
+        }
+        assert!(
+            !shape.iter().any(|unit| matches!(
+                unit.op,
+                Instruction::LoadSmallIntBinaryOp { .. }
+                    | Instruction::LoadSmallIntCompareOp { .. }
+                    | Instruction::LoadFastBorrowLoadFastBorrowBinaryOp { .. }
+                    | Instruction::LoadFastBorrowLoadFastBorrowCompareOp { .. }
+            )),
+            "cpython_shape still carries a fused opcode"
+        );
+
+        // The operator a fused load folded with stays exactly where it was, so
+        // unfolding leaves the CPython pair adjacent.
+        let add = shape
+            .iter()
+            .position(|unit| matches!(unit.op, Instruction::LoadSmallInt { .. }))
+            .expect("missing unfolded LOAD_SMALL_INT");
+        assert!(
+            matches!(shape[add + 1].op, Instruction::BinaryOp { .. }),
+            "expected BINARY_OP right after the unfolded load, got {:?}",
+            shape[add + 1]
+        );
     }
 
     fn full_opargs_for(
@@ -25051,11 +25144,8 @@ def f(s, size, errors):
 "#,
         );
         let f = find_code(&code, "f").expect("missing f code");
-        let instructions: Vec<_> = f
-            .instructions
-            .iter()
-            .filter(|unit| !matches!(unit.op, Instruction::Cache))
-            .collect();
+        let shape_units = cpython_shape(f);
+        let instructions: Vec<_> = shape_units.iter().collect();
         let import_idx = instructions
             .iter()
             .position(|unit| matches!(unit.op, Instruction::ImportName { .. }))
@@ -25990,11 +26080,8 @@ def f(inpos, size, g, replacement):
 ",
         );
         let f = find_code(&code, "f").expect("missing function code");
-        let ops: Vec<_> = f
-            .instructions
-            .iter()
-            .filter(|unit| !matches!(unit.op, Instruction::Cache))
-            .collect();
+        let shape_units = cpython_shape(f);
+        let ops: Vec<_> = shape_units.iter().collect();
         let arg = |unit: &&bytecode::CodeUnit| OpArg::new(u32::from(u8::from(unit.arg)));
         let is_inpos_load = |unit: &&bytecode::CodeUnit| match unit.op {
             Instruction::LoadFast { var_num } | Instruction::LoadFastBorrow { var_num } => {
@@ -34225,12 +34312,7 @@ def f(keys, parse_int, d, ampm, AM, PM):
 ",
         );
         let f = find_code(&code, "f").expect("missing f code");
-        let ops: Vec<_> = f
-            .instructions
-            .iter()
-            .map(|unit| unit.op)
-            .filter(|op| !matches!(op, Instruction::Cache))
-            .collect();
+        let ops = cpython_shape_ops(f);
 
         assert!(
             ops.windows(5).any(|window| {
@@ -35597,12 +35679,7 @@ def f(code):
 ",
         );
         let f = find_code(&code, "f").expect("missing f code");
-        let ops: Vec<_> = f
-            .instructions
-            .iter()
-            .map(|unit| unit.op)
-            .filter(|op| !matches!(op, Instruction::Cache))
-            .collect();
+        let ops = cpython_shape_ops(f);
 
         assert!(
             ops.windows(6).any(|window| {
@@ -37137,11 +37214,8 @@ def f(function, stem):
             }
             _ => None,
         };
-        let instructions: Vec<_> = f
-            .instructions
-            .iter()
-            .filter(|unit| !matches!(unit.op, Instruction::Cache))
-            .collect();
+        let shape_units = cpython_shape(f);
+        let instructions: Vec<_> = shape_units.iter().collect();
 
         let body_method_call_uses_strong_loads = instructions.windows(4).any(|window| {
             matches!(window[0].op, Instruction::LoadFast { .. })
@@ -38416,12 +38490,7 @@ def f(flags, A, B, stop):
 ",
         );
         let f = find_code(&code, "f").expect("missing f code");
-        let ops: Vec<_> = f
-            .instructions
-            .iter()
-            .map(|unit| unit.op)
-            .filter(|op| !matches!(op, Instruction::Cache))
-            .collect();
+        let ops = cpython_shape_ops(f);
 
         assert!(
             ops.windows(12).any(|window| {
@@ -42142,11 +42211,8 @@ def f(self, value, start=0, stop=None):
 ",
         );
         let f = find_code(&code, "f").expect("missing f code");
-        let instructions: Vec<_> = f
-            .instructions
-            .iter()
-            .filter(|unit| !matches!(unit.op, Instruction::Cache))
-            .collect();
+        let shape_units = cpython_shape(f);
+        let instructions: Vec<_> = shape_units.iter().collect();
 
         assert!(
             instructions.windows(7).any(|window| {
@@ -42213,11 +42279,8 @@ def f(items):
 ",
         );
         let f = find_code(&code, "f").expect("missing f code");
-        let instructions: Vec<_> = f
-            .instructions
-            .iter()
-            .filter(|unit| !matches!(unit.op, Instruction::Cache))
-            .collect();
+        let shape_units = cpython_shape(f);
+        let instructions: Vec<_> = shape_units.iter().collect();
 
         assert!(
             instructions
@@ -42680,12 +42743,7 @@ def f(compiler_so):
 ",
         );
         let f = find_code(&code, "f").expect("missing function code");
-        let ops: Vec<_> = f
-            .instructions
-            .iter()
-            .map(|unit| unit.op)
-            .filter(|op| !matches!(op, Instruction::Cache))
-            .collect();
+        let ops = cpython_shape_ops(f);
 
         assert!(
             ops.windows(15).any(|window| {
@@ -42730,12 +42788,7 @@ def f(chunks):
 ",
         );
         let f = find_code(&code, "f").expect("missing function code");
-        let ops: Vec<_> = f
-            .instructions
-            .iter()
-            .map(|unit| unit.op)
-            .filter(|op| !matches!(op, Instruction::Cache))
-            .collect();
+        let ops = cpython_shape_ops(f);
 
         assert!(
             ops.windows(7).any(|window| {
