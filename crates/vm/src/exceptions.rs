@@ -2290,6 +2290,23 @@ pub(super) mod types {
     }
 
     // OS Errors:
+    /// CPython's `oserror_use_init` (Objects/exceptions.c:2183): OSError defers
+    /// argument parsing to the class's own `__init__` when the class supplies one
+    /// and keeps OSError's `__new__`. Expressed here as "the initializer this call
+    /// resolves to is not OSError's own", which works for static subclasses too
+    /// because `extend_exception!` copies the inherited slot into them.
+    fn oserror_defers_to_own_init(cls: &Py<PyType>, vm: &VirtualMachine) -> bool {
+        match (
+            cls.resolved_init(),
+            vm.ctx.exceptions.os_error.slots.init.load(),
+        ) {
+            (Some(mine), Some(os_error_init)) => {
+                crate::types::fn_addr(mine) != crate::types::fn_addr(os_error_init)
+            }
+            _ => false,
+        }
+    }
+
     impl Constructor for PyOSError {
         type Args = FuncArgs;
 
@@ -2333,24 +2350,10 @@ pub(super) mod types {
         fn slot_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
             // CPython rejects keywords for an OSError built through its own
             // `__new__`, and defers argument parsing to the class's own
-            // `__init__` otherwise - `oserror_use_init`,
-            // Objects/exceptions.c:2183. The fork's equivalent of "this class
-            // still uses OSError's initializer" is a resolved init slot that
-            // matches OSError's own, which `extend_exception!` now fills for
-            // every subclass; a heap class that defines `__init__` keeps its own
-            // slot value, so its keywords belong to that initializer. The message
+            // `__init__` otherwise - see `oserror_defers_to_own_init`. The message
             // names the called class, which is why it has to happen before the
             // errno-to-subclass mapping below.
-            let defers_to_subclass_init = match (
-                cls.slots.init.load(),
-                vm.ctx.exceptions.os_error.slots.init.load(),
-            ) {
-                (Some(mine), Some(os_error_init)) => {
-                    crate::types::fn_addr(mine) != crate::types::fn_addr(os_error_init)
-                }
-                _ => false,
-            };
-            if !args.kwargs.is_empty() && !defers_to_subclass_init {
+            if !args.kwargs.is_empty() && !oserror_defers_to_own_init(&cls, vm) {
                 let name = cls.name();
                 return Err(vm.new_type_error(format!("{}() takes no keyword arguments", name)));
             }

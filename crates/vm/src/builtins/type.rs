@@ -976,17 +976,31 @@ impl PyType {
     /// filling it for every builtin would also start running `object.__init__`
     /// where `type.__call__` currently skips it.
     pub(crate) fn inherit_init_slot(&self) {
-        if self.slots.init.load().is_some() {
-            return;
+        if self.slots.init.load().is_none()
+            && let Some(init) = self.resolved_init()
+        {
+            self.slots.init.store(Some(init));
+        }
+    }
+
+    /// The `__init__` slot a call to this type must run, following the base chain.
+    ///
+    /// `slots.init` is only filled by a class that defines `__init__` itself, or by
+    /// one whose immediate base defined it (types/slot_defs.rs `TpInit`), so this
+    /// is what `type.__call__` has to consult to know whether an initializer
+    /// exists.
+    pub(crate) fn resolved_init(&self) -> Option<crate::types::InitFunc> {
+        if let Some(init) = self.slots.init.load() {
+            return Some(init);
         }
         let mut next = self.base.deref().map(|base| base.to_owned());
         while let Some(cls) = next {
             if let Some(init) = cls.slots.init.load() {
-                self.slots.init.store(Some(init));
-                return;
+                return Some(init);
             }
             next = cls.base.deref().map(|base| base.to_owned());
         }
+        None
     }
 
     /// Recompute every slot for this type and all its descendants. update_all_slots
