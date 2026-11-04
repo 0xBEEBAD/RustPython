@@ -940,6 +940,11 @@ impl PyStr {
             .class()
             .is(vm.ctx.types.str_type)
             .then(|| zelf.as_object());
+        if crate::perf_debug::ablated(crate::perf_debug::SPL_BIND)
+            && crate::perf_debug::stub_str_subject(zelf.as_wtf8().as_bytes())
+        {
+            return Ok(vec![zelf.as_object().to_owned()]);
+        }
         let elements = match zelf.as_str_kind() {
             PyKindStr::Ascii(s) => s.py_split(
                 args,
@@ -953,11 +958,30 @@ impl PyStr {
                     // result vector is allocated once, and build each piece
                     // without the generic string-creation path.
                     if sep.len() == 1 && !crate::perf_debug::ablated(crate::perf_debug::SPLIT) {
+                        let stubbed = crate::perf_debug::stub_str_subject(bytes);
+                        if crate::perf_debug::ablated(crate::perf_debug::SPL_SCAN) && stubbed {
+                            // Same vector length and same piece sizes as an even
+                            // split, without the occurrence count or the split
+                            // iterator: read this gate only on the row whose real
+                            // split gives two pieces, so the allocation profile
+                            // matches.
+                            let mut out = Vec::with_capacity(2);
+                            let half = bytes.len() / 2;
+                            out.push(ascii_piece(&bytes[..half], vm));
+                            out.push(ascii_piece(&bytes[half..], vm));
+                            return out;
+                        }
                         let sep_byte = sep[0];
                         let pieces = bytes.iter().filter(|&&b| b == sep_byte).count() + 1;
                         let mut out = Vec::with_capacity(pieces);
+                        let pieces_only =
+                            crate::perf_debug::ablated(crate::perf_debug::SPL_PIECES) && stubbed;
                         for piece in bytes.split(|&b| b == sep_byte) {
-                            out.push(ascii_piece(piece, vm));
+                            out.push(if pieces_only {
+                                vm.ctx.none().into()
+                            } else {
+                                ascii_piece(piece, vm)
+                            });
                         }
                         return out;
                     }

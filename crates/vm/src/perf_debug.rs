@@ -53,10 +53,23 @@
 //!   owned-`Vec` packing separately from everything the callee does
 //! * `encfast` - send every `str.encode()` through the codec registry again, even
 //!   the utf-8/strict spellings whose answer is the string's own bytes
-//! * `splreuse` - make a split that found no separator allocate its single piece
-//!   again instead of handing back the receiver. That prices one object allocation
-//!   plus its free inside one binary; `bench/labs/test_split_reuse.py` pins which
-//!   shapes CPython reuses, and fails while this bit is set.
+//! * `splreuse` - make a split that found no separator hand back the receiver as
+//!   the single element again. Note what this does *not* price: the piece is still
+//!   built and dropped either way, so the gate only measures the reference that
+//!   changes hands. `bench/labs/test_split_reuse.py` pins the shapes CPython
+//!   reuses and reports 27/42 while this bit is set.
+//! * `splbind` - `str.split` answers with the receiver in a one-element vector
+//!   before its kernel runs, so everything past argument binding - the generic
+//!   dispatch, the separator scan and the piece loop - comes off the ledger
+//! * `splpiece` - the single-byte separator loop pushes `None` where it would
+//!   build a piece, which prices the piece objects by themselves
+//! * `spscan` - the same loop skips both the occurrence count and the split
+//!   iterator and cuts two pieces out of the whole receiver, separating the scan
+//!   from the allocation it feeds
+//!
+//! `splbind`, `splpiece` and `spscan` change the answer, so they only fire on a
+//! receiver whose text starts with `LUNA_STUB_STR=<prefix>`: startup splits paths,
+//! and a stubbed split there does not crash, it boots wrong.
 //!
 //! `LUNA_STUB_BODY=<qualname prefix>` is a second, complementary instrument: the
 //! matching functions answer `None` before their first instruction, and
@@ -203,6 +216,20 @@ pub(crate) const DEC_FASTPATH: u64 = 34359738368;
 /// reproduces the identity difference the reuse rule fixes, so the parity probe
 /// `bench/labs/test_split_reuse.py` fails while this bit is set.
 pub(crate) const SPLIT_REUSE: u64 = 68719476736;
+/// Measurement only: `str.split` answers with the receiver in a one-element
+/// vector before `py_split` runs, so everything the kernel does past argument
+/// binding - dispatch, separator scan, piece loop - is off the ledger. The
+/// vector and the list it becomes are still built, because dropping them is
+/// part of what the caller pays.
+pub(crate) const SPL_BIND: u64 = 137438953472;
+/// Measurement only: the single-byte separator loop pushes `None` where it
+/// would build a piece, so the difference against the normal path is the price
+/// of the piece objects themselves.
+pub(crate) const SPL_PIECES: u64 = 274877906944;
+/// Measurement only: the single-byte separator path skips both the occurrence
+/// count and the split iterator and builds two pieces out of the whole receiver,
+/// which prices the scan separately from the allocation it feeds.
+pub(crate) const SPL_SCAN: u64 = 549755813888;
 
 /// Measurement only: the qualified-name prefix whose function bodies are
 /// skipped, so one call splits into "dispatch, argument binding, frame entry
@@ -252,6 +279,25 @@ pub(crate) fn stub_md_name(name: &str) -> bool {
     names.iter().any(|stubbed| *stubbed == name)
 }
 
+/// Measurement only: whether a `str` method may shortcut on this receiver.
+///
+/// The instrument changes the answer, so it must not reach the interpreter's own
+/// strings - startup splits paths, and a stubbed split there does not fail loudly,
+/// it boots wrong. Matching the receiver's prefix instead of the method name is
+/// what lets one probe string (`LUNA_STUB_STR=<prefix>`) hold every row while no
+/// library string ever matches. Unset, the normal case, it costs one cached load
+/// plus a length compare.
+pub(crate) fn stub_str_subject(content: &[u8]) -> bool {
+    static FRAGMENT: OnceLock<Option<&'static str>> = OnceLock::new();
+    let fragment = FRAGMENT.get_or_init(|| {
+        std::env::var("LUNA_STUB_STR")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(|value| &*Box::leak(value.into_boxed_str()))
+    });
+    fragment.is_some_and(|prefix| content.starts_with(prefix.as_bytes()))
+}
+
 /// True when the named optimization is ablated through `LUNA_ABLATE`.
 pub(crate) fn ablated(bit: u64) -> bool {
     static MASK: OnceLock<u64> = OnceLock::new();
@@ -297,6 +343,9 @@ pub(crate) fn ablated(bit: u64) -> bool {
                     "encfast" => ENC_FASTPATH,
                     "decfast" => DEC_FASTPATH,
                     "splreuse" => SPLIT_REUSE,
+                    "splbind" => SPL_BIND,
+                    "splpiece" => SPL_PIECES,
+                    "spscan" => SPL_SCAN,
 
                     // A bare number is accepted as the bit mask itself, so a
                     // probe can address a bit that has no alias here. Unknown
