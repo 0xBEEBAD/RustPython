@@ -9955,10 +9955,6 @@ impl ExecutingFrame<'_> {
         Ok(None)
     }
 
-    /// Exact-type arithmetic that cannot invoke user code. Returns `None` when
-    /// the operands are not exact builtin numbers, leaving the caller to use
-    /// the generic protocol path.
-    #[inline]
     /// Answer a call straight from the caller's stack when the callee's entire
     /// body is one arithmetic expression over its parameters (see
     /// [`crate::builtins::code::MicroPlan`], computed once per code object).
@@ -10006,6 +10002,10 @@ impl ExecutingFrame<'_> {
         }
     }
 
+    /// Exact-type arithmetic that cannot invoke user code. Returns `None` when
+    /// the operands are not exact builtin numbers, leaving the caller to use
+    /// the generic protocol path.
+    #[inline]
     fn bin_op_exact_fast(
         a: &PyObject,
         b: &PyObject,
