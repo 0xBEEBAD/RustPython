@@ -14,13 +14,13 @@ use crate::{
     convert::ToPyObject,
     function::{Either, FuncArgs, OptionalArg, PyComparisonValue},
     iter::PyExactSizeIterator,
-    protocol::{PyIterReturn, PyMappingMethods, PySequenceMethods},
+    protocol::{PyIterReturn, PyMappingMethods, PyNumberMethods, PySequenceMethods},
     recursion::ReprGuard,
     sequence::{MutObjectSequenceOp, OptionalRangeArgs, SequenceExt, SequenceMutExt},
     sliceable::{SequenceIndex, SliceableSequenceMutOp, SliceableSequenceOp},
     sorting::timsort,
     types::{
-        AsMapping, AsSequence, Comparable, Constructor, Initializer, IterNext, Iterable,
+        AsMapping, AsNumber, AsSequence, Comparable, Constructor, Initializer, IterNext, Iterable,
         PyComparisonOp, Representable, RichCompareFunc, SelfIter,
     },
     vm::VirtualMachine,
@@ -201,6 +201,7 @@ pub type PyListRef = PyRef<PyList>;
         Iterable,
         Comparable,
         AsSequence,
+        AsNumber,
         Representable
     ),
     flags(BASETYPE, SEQUENCE, _MATCH_SELF)
@@ -609,6 +610,45 @@ impl AsMapping for PyList {
             }),
         };
         &AS_MAPPING
+    }
+}
+
+impl AsNumber for PyList {
+    fn as_number() -> &'static PyNumberMethods {
+        static AS_NUMBER: PyNumberMethods = PyNumberMethods {
+            add: Some(|a, b, vm| {
+                let Some(a) = a.downcast_ref::<PyList>() else {
+                    return Ok(vm.ctx.not_implemented());
+                };
+                if let Some(b) = b.downcast_ref::<PyList>() {
+                    return a.concat(b.as_object(), vm).map(|list| list.into());
+                }
+                // CPython gives list no `nb_add`: `PyNumber_Add` falls through
+                // to `list_concat` - our `list.__add__` attribute, which refuses
+                // a non-list - only after the right operand's `__radd__` has
+                // declined. A heap subclass inherited its `nb_add` from that
+                // raising attribute, so `ListSub([...]) + x` never asked
+                // `x.__radd__`; the chance has to be taken in this slot.
+                if let Some(radd) = vm.get_method(b.to_owned(), identifier!(vm, __radd__)) {
+                    let result = radd?.call((a.to_owned(),), vm)?;
+                    if !result.is(&vm.ctx.not_implemented()) {
+                        return Ok(result);
+                    }
+                }
+                Err(vm.new_concat_error("list", b))
+            }),
+            // Declared so that `list += <iterable>` keeps extending from anything
+            // iterable instead of falling back to `add` above, whose refusal
+            // belongs to concatenation only.
+            inplace_add: Some(|a, b, vm| {
+                let Some(a) = a.downcast_ref::<PyList>() else {
+                    return Ok(vm.ctx.not_implemented());
+                };
+                PyList::inplace_concat(a, b, vm)
+            }),
+            ..PyNumberMethods::NOT_IMPLEMENTED
+        };
+        &AS_NUMBER
     }
 }
 

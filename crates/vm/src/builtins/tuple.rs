@@ -580,6 +580,30 @@ impl AsNumber for PyTuple {
                 let zelf = number.obj.downcast_ref::<PyTuple>().unwrap();
                 Ok(!zelf.elements.is_empty())
             }),
+            add: Some(|a, b, vm| {
+                let Some(a) = a.downcast_ref::<PyTuple>() else {
+                    return Ok(vm.ctx.not_implemented());
+                };
+                match PyTuple::__add__(a.to_owned(), b.to_owned(), vm) {
+                    PyArithmeticValue::Implemented(tuple) => Ok(tuple.into()),
+                    // CPython gives tuple no `nb_add` at all: `PyNumber_Add`
+                    // reaches `tuple_concat` - the function our `tuple.__add__`
+                    // attribute is, and which refuses a non-tuple - only after
+                    // the right operand's `__radd__` has declined. A heap
+                    // subclass inherits its `nb_add` from that attribute, so
+                    // `TupleSub([...]) + x` never asked `x.__radd__` until this
+                    // slot started taking the chance itself.
+                    PyArithmeticValue::NotImplemented => {
+                        if let Some(radd) = vm.get_method(b.to_owned(), identifier!(vm, __radd__)) {
+                            let result = radd?.call((a.to_owned(),), vm)?;
+                            if !result.is(&vm.ctx.not_implemented()) {
+                                return Ok(result);
+                            }
+                        }
+                        Err(vm.new_concat_error("tuple", b))
+                    }
+                }
+            }),
             ..PyNumberMethods::NOT_IMPLEMENTED
         };
         &AS_NUMBER
