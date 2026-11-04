@@ -496,38 +496,7 @@ impl Context {
         if let Some(ch) = Self::latin1_singleton_index(&s) {
             return self.latin1_char(ch);
         }
-        // Dual-storage inline path: allocate trailing bytes after the full
-        // fixed struct and mirror the WTF-8 data there. Readers use StrData
-        // as before; once PyStr shrinks to a header-only layout the tail
-        // lands at CPython's compact-data offset (+40) automatically.
-        let copy_to_tail = !crate::perf_debug::ablated(crate::perf_debug::STR_CREATE);
-        let len = if copy_to_tail {
-            s.as_wtf8().len()
-        } else {
-            s.as_wtf8().as_bytes().to_vec().len()
-        };
-        let extra = len + 1;
-        let r = PyRef::<PyStr>::new_ref_with_extra(
-            s,
-            self.types.str_type.to_owned(),
-            None,
-            extra,
-        );
-        unsafe {
-            use crate::AsObject as _;
-            // PyInner<PyStr> = 16-byte header + sizeof(PyStr); the trailing
-            // extra bytes begin right after that whole fixed region.
-            let struct_end = (r.as_object().as_raw() as usize)
-                + 16
-                + core::mem::size_of::<PyStr>();
-            let tail = struct_end as *mut u8;
-            // Copy straight from the payload's bytes instead of staging a
-            // temporary Vec; the tail is disjoint from the payload storage.
-            let src = r.as_wtf8().as_bytes().as_ptr();
-            core::ptr::copy_nonoverlapping(src, tail, len);
-            *tail.add(len) = 0; // NUL terminator
-        }
-        r
+        s.into_ref(self)
     }
 
     #[inline]

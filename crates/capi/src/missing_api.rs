@@ -1070,12 +1070,12 @@ pub unsafe extern "C" fn PyThread_release_lock(lock: *mut c_void) {
 
 /// PyUnicode_New: create a new Unicode string with the given length and maxchar.
 ///
-/// Creates an inline-backed string so `PyUnicode_DATA`/`PyUnicode_READ` and
-/// C-extension string builders have a writable buffer of the requested size.
-/// The kind (ASCII vs UTF-8) is derived from `maxchar`: values < 0x80 yield a
-/// pure-ASCII string, larger values a UTF-8 string. The buffer is zero-filled
-/// so immediate writes land on NULs; `PyUnicode_FromKindAndData` fills real
-/// content.
+/// Creates a string whose bytes live in the payload's own inline-backed buffer,
+/// sized to the request, so `PyUnicode_FromKindAndData` and the readers that go
+/// through the payload find a real buffer of `size` bytes. The kind (ASCII vs
+/// UTF-8) is derived from `maxchar`: values < 0x80 yield a pure-ASCII string,
+/// larger values a UTF-8 string. The buffer is zero-filled so immediate writes
+/// land on NULs.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn PyUnicode_New(size: isize, maxchar: u32) -> *mut PyObject {
     with_vm(|vm| {
