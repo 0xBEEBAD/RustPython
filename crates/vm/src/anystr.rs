@@ -171,6 +171,7 @@ pub(crate) trait AnyStr {
         args: SplitArgs<T>,
         vm: &VirtualMachine,
         full_obj: impl FnOnce() -> PyObjectRef,
+        reuse_self: Option<&PyObject>,
         split: SP,
         splitn: SN,
         split_whitespace: SW,
@@ -184,7 +185,8 @@ pub(crate) trait AnyStr {
         if args.sep.as_ref().is_some_and(|sep| sep.is_empty()) {
             return Err(vm.new_value_error("empty separator"));
         }
-        let splits = if let Some(pattern) = args.sep {
+        let sep_mode = args.sep.is_some();
+        let mut splits = if let Some(pattern) = args.sep {
             let Some(pattern) = pattern.as_ref() else {
                 return Ok(vec![full_obj()]);
             };
@@ -196,6 +198,20 @@ pub(crate) trait AnyStr {
         } else {
             split_whitespace(self, args.maxsplit, vm)
         };
+        // CPython hands back the receiver itself when the separator does not
+        // occur (`Objects/stringlib/split.h`: `count == 0 &&
+        // STRINGLIB_CHECK_EXACT`), which also covers `maxsplit == 0`. A single
+        // piece is by construction the whole receiver, because a separator split
+        // never drops characters - unlike whitespace mode, so `sep_mode` gates it
+        // - and the caller only passes the receiver when its class is exactly the
+        // base type, because a subclass gets a fresh base-type piece instead.
+        if sep_mode
+            && splits.len() == 1
+            && let Some(zelf) = reuse_self
+            && !crate::perf_debug::ablated(crate::perf_debug::SPLIT_REUSE)
+        {
+            splits[0] = zelf.to_owned();
+        }
         Ok(splits)
     }
     fn py_split_whitespace<F>(&self, maxsplit: isize, convert: F) -> Vec<PyObjectRef>

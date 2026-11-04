@@ -53,6 +53,10 @@
 //!   owned-`Vec` packing separately from everything the callee does
 //! * `encfast` - send every `str.encode()` through the codec registry again, even
 //!   the utf-8/strict spellings whose answer is the string's own bytes
+//! * `splreuse` - make a split that found no separator allocate its single piece
+//!   again instead of handing back the receiver. That prices one object allocation
+//!   plus its free inside one binary; `bench/labs/test_split_reuse.py` pins which
+//!   shapes CPython reuses, and fails while this bit is set.
 //!
 //! `LUNA_STUB_BODY=<qualname prefix>` is a second, complementary instrument: the
 //! matching functions answer `None` before their first instruction, and
@@ -192,6 +196,13 @@ pub(crate) const ENC_FASTPATH: u64 = 17179869184;
 /// codec registry, so the utf-8/strict fast path can be priced against the round
 /// trip it skips inside one binary.
 pub(crate) const DEC_FASTPATH: u64 = 34359738368;
+/// Ablating this makes `str.split`/`bytes.split` allocate a fresh piece for the
+/// single element that CPython hands back as the receiver itself (see
+/// `Objects/stringlib/split.h`, `count == 0 && STRINGLIB_CHECK_EXACT`), which
+/// prices one object allocation plus its free inside one binary. It also
+/// reproduces the identity difference the reuse rule fixes, so the parity probe
+/// `bench/labs/test_split_reuse.py` fails while this bit is set.
+pub(crate) const SPLIT_REUSE: u64 = 68719476736;
 
 /// Measurement only: the qualified-name prefix whose function bodies are
 /// skipped, so one call splits into "dispatch, argument binding, frame entry
@@ -285,6 +296,7 @@ pub(crate) fn ablated(bit: u64) -> bool {
                     "mdarm" => MD_ARM,
                     "encfast" => ENC_FASTPATH,
                     "decfast" => DEC_FASTPATH,
+                    "splreuse" => SPLIT_REUSE,
 
                     // A bare number is accepted as the bit mask itself, so a
                     // probe can address a bit that has no alias here. Unknown

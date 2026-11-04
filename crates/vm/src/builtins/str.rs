@@ -933,11 +933,19 @@ impl PyStr {
 
     #[pymethod]
     fn split(zelf: &Py<Self>, args: SplitArgs, vm: &VirtualMachine) -> PyResult<Vec<PyObjectRef>> {
+        // CPython reuses the receiver for the single piece of a split that found
+        // nothing, but only when the class is exactly `str`: a subclass gets a
+        // fresh plain-str piece. Offer the receiver accordingly.
+        let reuse_self = zelf
+            .class()
+            .is(vm.ctx.types.str_type)
+            .then(|| zelf.as_object());
         let elements = match zelf.as_str_kind() {
             PyKindStr::Ascii(s) => s.py_split(
                 args,
                 vm,
                 || zelf.as_object().to_owned(),
+                reuse_self,
                 |v, s, vm| {
                     let bytes = v.as_bytes();
                     let sep = s.as_bytes();
@@ -973,6 +981,7 @@ impl PyStr {
                 args,
                 vm,
                 || zelf.as_object().to_owned(),
+                reuse_self,
                 |v, s, vm| v.split(s).map(|s| vm.ctx.new_str(s).into()).collect(),
                 |v, s, n, vm| v.splitn(n, s).map(|s| vm.ctx.new_str(s).into()).collect(),
                 |v, n, vm| v.py_split_whitespace(n, |s| vm.ctx.new_str(s).into()),
@@ -981,6 +990,7 @@ impl PyStr {
                 args,
                 vm,
                 || zelf.as_object().to_owned(),
+                reuse_self,
                 |v, s, vm| v.split(s).map(|s| vm.ctx.new_str(s).into()).collect(),
                 |v, s, n, vm| v.splitn(n, s).map(|s| vm.ctx.new_str(s).into()).collect(),
                 |v, n, vm| v.py_split_whitespace(n, |s| vm.ctx.new_str(s).into()),
@@ -991,10 +1001,15 @@ impl PyStr {
 
     #[pymethod]
     fn rsplit(zelf: &Py<Self>, args: SplitArgs, vm: &VirtualMachine) -> PyResult<Vec<PyObjectRef>> {
+        let reuse_self = zelf
+            .class()
+            .is(vm.ctx.types.str_type)
+            .then(|| zelf.as_object());
         let mut elements = zelf.as_wtf8().py_split(
             args,
             vm,
             || zelf.as_object().to_owned(),
+            reuse_self,
             |v, s, vm| v.rsplit(s).map(|s| vm.ctx.new_str(s).into()).collect(),
             |v, s, n, vm| v.rsplitn(n, s).map(|s| vm.ctx.new_str(s).into()).collect(),
             |v, n, vm| v.py_rsplit_whitespace(n, |s| vm.ctx.new_str(s).into()),

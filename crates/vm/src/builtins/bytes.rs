@@ -455,22 +455,40 @@ impl PyBytes {
 
     #[pymethod]
     fn split(
-        &self,
+        zelf: &Py<Self>,
         options: ByteInnerSplitOptions,
         vm: &VirtualMachine,
     ) -> PyResult<Vec<PyObjectRef>> {
-        self.inner
-            .split(options, |s, vm| vm.ctx.new_bytes(s.to_vec()).into(), vm)
+        // CPython reuses the receiver as the single piece of a split that found
+        // nothing, for an exact `bytes` only.
+        let reuse_self = zelf
+            .class()
+            .is(vm.ctx.types.bytes_type)
+            .then(|| zelf.as_object());
+        zelf.inner.split(
+            options,
+            |s, vm| vm.ctx.new_bytes(s.to_vec()).into(),
+            reuse_self,
+            vm,
+        )
     }
 
     #[pymethod]
     fn rsplit(
-        &self,
+        zelf: &Py<Self>,
         options: ByteInnerSplitOptions,
         vm: &VirtualMachine,
     ) -> PyResult<Vec<PyObjectRef>> {
-        self.inner
-            .rsplit(options, |s, vm| vm.ctx.new_bytes(s.to_vec()).into(), vm)
+        let reuse_self = zelf
+            .class()
+            .is(vm.ctx.types.bytes_type)
+            .then(|| zelf.as_object());
+        zelf.inner.rsplit(
+            options,
+            |s, vm| vm.ctx.new_bytes(s.to_vec()).into(),
+            reuse_self,
+            vm,
+        )
     }
 
     #[pymethod]

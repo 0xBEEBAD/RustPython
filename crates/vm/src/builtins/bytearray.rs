@@ -471,8 +471,10 @@ impl PyByteArray {
         options: ByteInnerSplitOptions,
         vm: &VirtualMachine,
     ) -> PyResult<Vec<PyObjectRef>> {
+        // A bytearray is mutable, so CPython never hands the receiver back as a
+        // piece (`STRINGLIB_MUTABLE` guard) - every piece is a copy.
         self.inner()
-            .split(options, |s, vm| vm.ctx.new_bytearray(s.to_vec()).into(), vm)
+            .split(options, |s, vm| vm.ctx.new_bytearray(s.to_vec()).into(), None, vm)
     }
 
     #[pymethod]
@@ -482,7 +484,7 @@ impl PyByteArray {
         vm: &VirtualMachine,
     ) -> PyResult<Vec<PyObjectRef>> {
         self.inner()
-            .rsplit(options, |s, vm| vm.ctx.new_bytearray(s.to_vec()).into(), vm)
+            .rsplit(options, |s, vm| vm.ctx.new_bytearray(s.to_vec()).into(), None, vm)
     }
 
     #[pymethod]

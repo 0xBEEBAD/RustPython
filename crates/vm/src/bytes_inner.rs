@@ -710,6 +710,7 @@ impl PyBytesInner {
         &self,
         options: ByteInnerSplitOptions,
         convert: F,
+        reuse_self: Option<&PyObject>,
         vm: &VirtualMachine,
     ) -> PyResult<Vec<PyObjectRef>>
     where
@@ -719,6 +720,7 @@ impl PyBytesInner {
             options,
             vm,
             || convert(&self.elements, vm),
+            reuse_self,
             |v, s, vm| v.split_str(s).map(|v| convert(v, vm)).collect(),
             |v, s, n, vm| v.splitn_str(n, s).map(|v| convert(v, vm)).collect(),
             |v, n, vm| v.py_split_whitespace(n, |v| convert(v, vm)),
@@ -730,6 +732,7 @@ impl PyBytesInner {
         &self,
         options: ByteInnerSplitOptions,
         convert: F,
+        reuse_self: Option<&PyObject>,
         vm: &VirtualMachine,
     ) -> PyResult<Vec<PyObjectRef>>
     where
@@ -739,6 +742,7 @@ impl PyBytesInner {
             options,
             vm,
             || convert(&self.elements, vm),
+            reuse_self,
             |v, s, vm| v.rsplit_str(s).map(|v| convert(v, vm)).collect(),
             |v, s, n, vm| v.rsplitn_str(n, s).map(|v| convert(v, vm)).collect(),
             |v, n, vm| v.py_rsplit_whitespace(n, |v| convert(v, vm)),
