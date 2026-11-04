@@ -38,7 +38,12 @@ docs/superpowers/
 
 # pip --target downloads and lab scratch (never commit vendored packages)
 bench/sitepkg*/
-bench/labs/
+bench/labs/*
+# The measurement instrument itself is part of the work: keep the probes and
+# drivers, but never the binaries, reference interpreters or run logs under it.
+!bench/labs/*.py
+!bench/labs/*.ps1
+!bench/labs/*.sh
 bench/reports/*.tmp
 bench/*.exe
 bench/*.pyc
