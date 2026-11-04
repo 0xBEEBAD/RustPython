@@ -651,6 +651,75 @@ impl Py<PyByteArray> {
         Ok(())
     }
 
+    /// `bytearray.take_bytes(n=None)`, new in CPython 3.15
+    /// (`bytearray_take_bytes_impl`): cut the first `n` bytes off and hand them
+    /// over as a `bytes`. Negative `n` counts from the end, `None` takes
+    /// everything. The 3.15 library leans on it - `asyncio.streams`, `_pyio`,
+    /// `wave`, `re._compiler`, `encodings.idna` and `encodings.punycode` - so the
+    /// rules that decide those callers are reproduced exactly: the size is read
+    /// *after* `n.__index__()` runs, because a conversion may append to this very
+    /// bytearray; an out-of-range count is an `IndexError` naming both numbers;
+    /// and an object that is not an index gets the C message, not the generic
+    /// one from the conversion.
+    #[pymethod]
+    fn take_bytes(
+        &self,
+        n: OptionalArg<PyObjectRef>,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyRef<PyBytes>> {
+        let given = match n {
+            OptionalArg::Missing => None,
+            OptionalArg::Present(value) => {
+                if value.is(&vm.ctx.none) {
+                    None
+                } else {
+                    Some(value)
+                }
+            }
+        };
+        // CPython: PyNumber_AsSsize_t(n, PyExc_IndexError), so a value too wide
+        // for the platform index is an IndexError, not an OverflowError.
+        let to_take = match given {
+            None => self.borrow_buf().len() as isize,
+            Some(value) => {
+                let Some(indexed) = value.try_index_opt(vm) else {
+                    return Err(vm.new_type_error("n must be an integer or None"));
+                };
+                indexed?
+                    .try_to_primitive::<isize>(vm)
+                    .map_err(|_| {
+                        vm.new_index_error("Python int too large to convert to C ssize_t")
+                    })?
+            }
+        };
+        let size = self.borrow_buf().len() as isize;
+        let mut to_take = to_take;
+        if to_take < 0 {
+            to_take += size;
+        }
+        if to_take < 0 || to_take > size {
+            return Err(vm.new_index_error(format!("can't take {to_take} bytes outside size {size}")));
+        }
+        let to_take = to_take as usize;
+        if to_take == 0 || size == 0 {
+            return Ok(vm.ctx.empty_bytes.clone());
+        }
+        let mut inner = self.try_resizable(vm)?;
+        let remaining = size as usize - to_take;
+        if to_take < remaining {
+            // Taking less than leaving: the tail stays where it is and the
+            // buffer keeps its capacity, which is what `__alloc__()` reports.
+            Ok(vm.ctx.new_bytes(inner.elements.drain(..to_take).collect()))
+        } else {
+            // Taking at least as much as leaving: the remainder is copied into
+            // a buffer of exactly its size, so a full take releases the storage.
+            let taken = inner.elements[..to_take].to_vec();
+            let rest = inner.elements[to_take..].to_vec();
+            inner.elements = rest;
+            Ok(vm.ctx.new_bytes(taken))
+        }
+    }
+
     #[pymethod]
     fn __reduce_ex__(
         &self,
