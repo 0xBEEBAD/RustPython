@@ -976,12 +976,17 @@ impl PyStr {
                         let mut out = Vec::with_capacity(pieces);
                         let pieces_only =
                             crate::perf_debug::ablated(crate::perf_debug::SPL_PIECES) && stubbed;
+                        let no_destroy =
+                            crate::perf_debug::ablated(crate::perf_debug::SPL_NODESTROY) && stubbed;
                         for piece in bytes.split(|&b| b == sep_byte) {
-                            out.push(if pieces_only {
-                                vm.ctx.none().into()
+                            if pieces_only {
+                                out.push(vm.ctx.none().into());
+                            } else if no_destroy {
+                                core::mem::forget(ascii_piece(piece, vm));
+                                out.push(vm.ctx.none().into());
                             } else {
-                                ascii_piece(piece, vm)
-                            });
+                                out.push(ascii_piece(piece, vm));
+                            }
                         }
                         return out;
                     }

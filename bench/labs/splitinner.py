@@ -14,7 +14,7 @@ move.
 
 import timeit
 
-N = 300_000
+N = 100_000
 p = "zzpabcdefgh"
 q = "abcdefgh"
 

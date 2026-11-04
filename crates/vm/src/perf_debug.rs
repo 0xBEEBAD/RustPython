@@ -230,6 +230,12 @@ pub(crate) const SPL_PIECES: u64 = 274877906944;
 /// count and the split iterator and builds two pieces out of the whole receiver,
 /// which prices the scan separately from the allocation it feeds.
 pub(crate) const SPL_SCAN: u64 = 549755813888;
+/// Measurement only: the single-byte separator loop builds each piece and then
+/// forgets it, so the list holds `None` but the constructor still ran. Read
+/// against `splpiece` (neither built nor dropped) this splits the per-object
+/// cost into constructor and destructor. It leaks the pieces on purpose, which
+/// is why it is an instrument and not a feature.
+pub(crate) const SPL_NODESTROY: u64 = 1099511627776;
 
 /// Measurement only: the qualified-name prefix whose function bodies are
 /// skipped, so one call splits into "dispatch, argument binding, frame entry
@@ -346,6 +352,7 @@ pub(crate) fn ablated(bit: u64) -> bool {
                     "splbind" => SPL_BIND,
                     "splpiece" => SPL_PIECES,
                     "spscan" => SPL_SCAN,
+                    "spnode" => SPL_NODESTROY,
 
                     // A bare number is accepted as the bit mask itself, so a
                     // probe can address a bit that has no alias here. Unknown
