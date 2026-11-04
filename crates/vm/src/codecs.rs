@@ -409,7 +409,7 @@ impl CodecsRegistry {
     }
 }
 
-fn normalize_encoding_name(encoding: &str) -> Cow<'_, str> {
+pub(crate) fn normalize_encoding_name(encoding: &str) -> Cow<'_, str> {
     // _Py_normalize_encoding: collapse non-alphanumeric/non-dot chars into
     // single underscore, strip non-ASCII, lowercase ASCII letters.
     let needs_transform = encoding

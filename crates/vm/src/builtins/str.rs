@@ -2140,6 +2140,39 @@ pub(crate) fn encode_string(
     errors: Option<PyUtf8StrRef>,
     vm: &VirtualMachine,
 ) -> PyResult<PyBytesRef> {
+    // A `str.encode()` with no arguments is utf-8/strict by definition, not a
+    // codec name, so a search function registered at runtime cannot reach it and
+    // the registry holds no answer the fast path could get wrong. The same is true
+    // of the utf-8 aliases and an explicit "strict": both builtin entries are in
+    // the registry's cache before any user search function exists, which
+    // bench/labs/test_encode_fastpath.py pins on both interpreters.
+    //
+    // For a string whose bytes are already UTF-8 - every kind except the ones
+    // holding a lone surrogate - utf-8 *is* its byte string, so the whole round
+    // trip can go: name normalisation, the registry lock, the hash, the
+    // `_is_text_encoding` attribute probe, a Python-level call into
+    // `codecs.utf_8_encode`, and the `(bytes, index)` tuple it returns. Measured
+    // on release-lite, that round trip was 668 ns of an `s.encode()` CPython does
+    // in 33, and 583 ns of an empty `''.encode()`.
+    let utf8_name = match encoding.as_ref() {
+        None => true,
+        Some(name) => matches!(
+            crate::codecs::normalize_encoding_name(name.as_str()).as_ref(),
+            "utf_8" | "utf8" | "utf" | "u8"
+        ),
+    };
+    let strict = match errors.as_ref() {
+        None => true,
+        Some(errors) => errors.as_str() == "strict",
+    };
+    let kind = s.kind();
+    if utf8_name
+        && strict
+        && (kind.is_ascii() || kind.is_utf8())
+        && !crate::perf_debug::ablated(crate::perf_debug::ENC_FASTPATH)
+    {
+        return Ok(vm.ctx.new_bytes(s.as_wtf8().as_bytes().to_vec()));
+    }
     let encoding = match encoding.as_ref() {
         None => crate::codecs::DEFAULT_ENCODING,
         Some(s) => s.as_str(),

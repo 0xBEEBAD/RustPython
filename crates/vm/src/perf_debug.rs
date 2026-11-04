@@ -51,6 +51,8 @@
 //! * `mdarm` - consume the descriptor call's slots and answer `None` without
 //!   building the argument vector; read against `mdstub`, the two price the
 //!   owned-`Vec` packing separately from everything the callee does
+//! * `encfast` - send every `str.encode()` through the codec registry again, even
+//!   the utf-8/strict spellings whose answer is the string's own bytes
 //!
 //! `LUNA_STUB_BODY=<qualname prefix>` is a second, complementary instrument: the
 //! matching functions answer `None` before their first instruction, and
@@ -182,6 +184,10 @@ pub(crate) const MD_CTX: u64 = 4294967296;
 /// builds the vector and the `FuncArgs` but skips the callee, the difference is
 /// exactly what packing the arguments into an owned `Vec` costs.
 pub(crate) const MD_ARM: u64 = 8589934592;
+/// Ablating this routes every `str.encode` back through the codec registry, so
+/// the utf-8/strict fast path and the round trip it skips can be compared inside
+/// one binary.
+pub(crate) const ENC_FASTPATH: u64 = 17179869184;
 
 /// Measurement only: the qualified-name prefix whose function bodies are
 /// skipped, so one call splits into "dispatch, argument binding, frame entry
@@ -273,6 +279,7 @@ pub(crate) fn ablated(bit: u64) -> bool {
                     "mdstub" => MD_STUB,
                     "mdctx" => MD_CTX,
                     "mdarm" => MD_ARM,
+                    "encfast" => ENC_FASTPATH,
 
                     // A bare number is accepted as the bit mask itself, so a
                     // probe can address a bit that has no alias here. Unknown
