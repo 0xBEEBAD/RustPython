@@ -188,6 +188,10 @@ pub(crate) const MD_ARM: u64 = 8589934592;
 /// the utf-8/strict fast path and the round trip it skips can be compared inside
 /// one binary.
 pub(crate) const ENC_FASTPATH: u64 = 17179869184;
+/// Ablating this sends `bytes.decode()` and `bytearray.decode()` back through the
+/// codec registry, so the utf-8/strict fast path can be priced against the round
+/// trip it skips inside one binary.
+pub(crate) const DEC_FASTPATH: u64 = 34359738368;
 
 /// Measurement only: the qualified-name prefix whose function bodies are
 /// skipped, so one call splits into "dispatch, argument binding, frame entry
@@ -280,6 +284,7 @@ pub(crate) fn ablated(bit: u64) -> bool {
                     "mdctx" => MD_CTX,
                     "mdarm" => MD_ARM,
                     "encfast" => ENC_FASTPATH,
+                    "decfast" => DEC_FASTPATH,
 
                     // A bare number is accepted as the bit mask itself, so a
                     // probe can address a bit that has no alias here. Unknown

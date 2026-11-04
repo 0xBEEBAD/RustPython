@@ -1176,6 +1176,41 @@ pub(crate) fn bytes_decode(
     vm: &VirtualMachine,
 ) -> PyResult<PyStrRef> {
     let DecodeArgs { encoding, errors } = args;
+    // The utf-8/strict default of `bytes.decode()` is not a registry lookup any
+    // more than `str.encode()`'s is, and a byte string that is already valid
+    // UTF-8 decodes to exactly those bytes. Rust's validator rejects the same
+    // forms CPython's does - overlongs, surrogates like `b"\xed\xa0\x80"`,
+    // truncated and invalid continuation sequences - so anything that must raise
+    // `UnicodeDecodeError` keeps falling through to the codec machinery, which is
+    // where the message and its offsets live.
+    let utf8_name = match encoding.as_ref() {
+        None => true,
+        Some(name) => matches!(
+            crate::codecs::normalize_encoding_name(name.as_str()).as_ref(),
+            "utf_8" | "utf8" | "utf" | "u8"
+        ),
+    };
+    let strict = match errors.as_ref() {
+        None => true,
+        Some(errors) => errors.as_str() == "strict",
+    };
+    if utf8_name
+        && strict
+        && !crate::perf_debug::ablated(crate::perf_debug::DEC_FASTPATH)
+    {
+        let raw = if let Some(bytes) = zelf.downcast_ref_if_exact::<PyBytes>(vm) {
+            Some(bytes.as_bytes().to_vec())
+        } else if let Some(bytearray) = zelf.downcast_ref_if_exact::<PyByteArray>(vm) {
+            Some(bytearray.borrow_buf().to_vec())
+        } else {
+            None
+        };
+        if let Some(raw) = raw
+            && let Ok(text) = String::from_utf8(raw)
+        {
+            return Ok(vm.ctx.new_str(text));
+        }
+    }
     let encoding = match encoding.as_ref() {
         None => crate::codecs::DEFAULT_ENCODING,
         Some(e) => e.as_str(),
