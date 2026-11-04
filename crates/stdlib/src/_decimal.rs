@@ -5917,6 +5917,31 @@ _ => return Ok(PyDecimal::to_py(vm, self.d.clone())),
         Ok(())
     }
 
+    /// CPython's module-level `__getattr__` (`decimal_getattr` in
+    /// Modules/_decimal/_decimal.c). 3.15 took `__version__` out of the module
+    /// dict and answers it here behind a DeprecationWarning, so the attribute
+    /// still resolves - and a warning filter turned into an error still aborts
+    /// the lookup, which is why the warning is propagated instead of ignored.
+    /// The AttributeError says `decimal` even though this module is `_decimal`,
+    /// because that is the name the C format string hardcodes.
+    #[pyfunction(name = "__getattr__")]
+    fn module_getattr(name: PyStrRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        if name.as_wtf8() == "__version__" {
+            crate::vm::stdlib::_warnings::warn(
+                vm.ctx.exceptions.deprecation_warning,
+                "'__version__' is deprecated and slated for removal in Python 3.20".to_owned(),
+                1,
+                vm,
+            )?;
+            return Ok(vm.ctx.new_str("1.70").into());
+        }
+        let shown = name.as_object().repr(vm)?;
+        Err(vm.new_attribute_error(format!(
+            "module 'decimal' has no attribute {}",
+            shown.to_string_lossy()
+        )))
+    }
+
     #[pyfunction]
     fn IEEEContext(bits: usize, vm: &VirtualMachine) -> PyResult {
         // Return a context with precision/bounds appropriate for the given
@@ -5972,7 +5997,7 @@ _ => return Ok(PyDecimal::to_py(vm, self.d.clone())),
         set("IEEE_CONTEXT_MAX_BITS", vm.ctx.new_int(BigInt::from(512i64)).into())?;
         set("HAVE_THREADS", vm.ctx.new_bool(true).into())?;
         set("HAVE_CONTEXTVAR", vm.ctx.new_bool(false).into())?;
-        set("__version__", vm.ctx.new_str("1.70").into())?;
+        set("SPEC_VERSION", vm.ctx.new_str("1.70").into())?;
         set("__libmpdec_version__", vm.ctx.new_str("2.4.2").into())?;
         for r in [
             "ROUND_CEILING",
