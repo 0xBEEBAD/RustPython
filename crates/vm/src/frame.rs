@@ -7409,6 +7409,20 @@ impl ExecutingFrame<'_> {
                         .is_some_and(|self_obj| self_obj.class().is(descr.objclass))
                 {
                     let func = descr.method.func;
+                    let md_name = descr.method.name;
+                    if crate::perf_debug::ablated(crate::perf_debug::MD_ARM)
+                        && crate::perf_debug::stub_md_name(md_name)
+                    {
+                        self.pop_multiple(nargs as usize).for_each(drop);
+                        self.pop_value_opt(); // self
+                        self.pop_value(); // callable
+                        self.push_value_or_discard(
+                            vm.ctx.none(),
+                            Instruction::from(Opcode::Call).cache_entries(),
+                            vm,
+                        );
+                        return Ok(None);
+                    }
                     // One pass: drain the positional args and prepend the
                     // explicit self (one spare slot reserved for it). The
                     // display name is resolved lazily from the callable,
@@ -7424,8 +7438,23 @@ impl ExecutingFrame<'_> {
                         args: all_args,
                         ..Default::default()
                     };
-                    let result =
-                        crate::utils::with_call_context(Some(&callable_obj), 1, || func(vm, args))?;
+                    if crate::perf_debug::ablated(crate::perf_debug::MD_STUB)
+                        && crate::perf_debug::stub_md_name(md_name)
+                    {
+                        self.push_value_or_discard(
+                            vm.ctx.none(),
+                            Instruction::from(Opcode::Call).cache_entries(),
+                            vm,
+                        );
+                        return Ok(None);
+                    }
+                    let result = if crate::perf_debug::ablated(crate::perf_debug::MD_CTX) {
+                        func(vm, args)
+                    } else {
+                        crate::utils::with_call_context(Some(&callable_obj), 1, || {
+                            func(vm, args)
+                        })
+                    }?;
                     self.push_value_or_discard(
                         result,
                         Instruction::from(Opcode::Call).cache_entries(),
