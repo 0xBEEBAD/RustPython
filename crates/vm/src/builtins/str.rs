@@ -211,11 +211,16 @@ fn ascii_piece(piece: &[u8], vm: &VirtualMachine) -> PyObjectRef {
 
 impl<'a> From<&'a AsciiStr> for PyStr {
     fn from(s: &'a AsciiStr) -> Self {
-        // Short ASCII strings live entirely in the header: no allocation.
-        if let Some(data) = StrData::try_sso(s.as_bytes()) {
-            return data.into();
+        if crate::perf_debug::ablated(crate::perf_debug::STR_KNOWN_ASCII) {
+            // The pre-fix route, kept measurable in one binary: it re-derives the
+            // kind from bytes the caller already proved ASCII, and the boxed
+            // fallback derives it again.
+            if let Some(data) = StrData::try_sso(s.as_bytes()) {
+                return data.into();
+            }
+            return s.to_owned().into();
         }
-        s.to_owned().into()
+        StrData::from_known_ascii(s.as_bytes()).into()
     }
 }
 

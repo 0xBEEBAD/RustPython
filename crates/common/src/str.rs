@@ -510,6 +510,37 @@ impl From<CodePoint> for StrData {
 }
 
 impl StrData {
+    /// Bytes that the caller has already proven are ASCII.
+    ///
+    /// [`Self::try_sso`] has to *find out* the kind, which for WTF-8 means an
+    /// `is_ascii()` pass over the bytes and, when that fails, an `is_utf8()` pass
+    /// plus a code-point count - and the boxed fallback runs the check again,
+    /// because `From<Box<AsciiStr>>` re-tests SSO through [`Self::try_sso_ascii`],
+    /// which scans `is_ascii()` a second time before calling `try_sso`. So a
+    /// caller that already holds ASCII bytes pays up to four scans of data whose
+    /// kind, character count and storage class are all known.
+    #[inline]
+    pub fn from_known_ascii(bytes: &[u8]) -> Self {
+        if let Some(buf) = SsoBuf::new(bytes) {
+            return Self {
+                len: bytes.len().into(),
+                data: StrStorage::Sso(buf),
+                kind: StrKind::Ascii,
+                index: Wtf8IndexSlot::new(),
+            };
+        }
+        // One allocation and still no scan: `From<Box<AsciiStr>>` would re-test
+        // SSO through `try_sso_ascii`, which scans `is_ascii()` over bytes whose
+        // provenance we already know, and the length is out of SSO by here.
+        let piece = unsafe { AsciiStr::from_ascii_unchecked(bytes) };
+        Self {
+            len: bytes.len().into(),
+            data: StrStorage::Heap(piece.to_owned().into_boxed_ascii_str().into()),
+            kind: StrKind::Ascii,
+            index: Wtf8IndexSlot::new(),
+        }
+    }
+
     /// Store a short string (≤ 22 bytes, any WTF-8) entirely inside the
     /// header — no heap allocation at all. Returns `None` when the bytes are
     /// too long, in which case callers fall back to boxed storage.

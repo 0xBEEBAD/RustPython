@@ -70,6 +70,9 @@
 //!   the datastack-space check (whose frame size is recomputed per call from the
 //!   code object) and the recursion-depth check, so a fix targets the one that
 //!   pays rather than the pair
+//! * `strascii` - build an ASCII string by re-deriving its kind from bytes the
+//!   caller already proved ASCII, which prices the scans that
+//!   `StrData::from_known_ascii` now skips
 //!
 //! `splbind`, `splpiece` and `spscan` change the answer, so they only fire on a
 //! receiver whose text starts with `LUNA_STUB_STR=<prefix>`: startup splits paths,
@@ -252,6 +255,13 @@ pub(crate) const ARM_DATASTACK: u64 = 2199023255552;
 /// Never enable while running real code: it is what stops a deep call from
 /// overrunning the native stack.
 pub(crate) const ARM_RECURSION: u64 = 4398046511104;
+/// Measurement only: builds an ASCII string the way this fork used to - through
+/// `StrData::try_sso`, which deduces the kind with an `is_ascii()` pass (and for
+/// non-ASCII an `is_utf8()` pass plus a code-point count), and whose boxed
+/// fallback deduces it again. `ascii_piece` hands over bytes it has already
+/// proven ASCII, so every scan here is work the caller did for free; the bit
+/// prices how much that was worth.
+pub(crate) const STR_KNOWN_ASCII: u64 = 8796093022208;
 
 /// Measurement only: the qualified-name prefix whose function bodies are
 /// skipped, so one call splits into "dispatch, argument binding, frame entry
@@ -353,6 +363,7 @@ pub(crate) fn ablated(bit: u64) -> bool {
                     "armguards" => ARM_GUARDS,
                     "armdata" => ARM_DATASTACK,
                     "armrecur" => ARM_RECURSION,
+                    "strascii" => STR_KNOWN_ASCII,
                     "armstage" => ARM_STAGE,
                     "argsslack" => ARGS_SLACK,
                     "microinline" => MICRO_INLINE,
