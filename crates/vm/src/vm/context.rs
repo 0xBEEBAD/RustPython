@@ -282,16 +282,19 @@ declare_const_name! {
 }
 
 // Basic objects:
+rustpython_common::static_cell! {
+    /// The one `Context` every `genesis()` caller shares; see
+    /// [`Context::try_genesis`] for why drop paths must not initialize it.
+    static GENESIS: PyRc<Context>;
+}
+
 impl Context {
     pub const INT_CACHE_POOL_RANGE: core::ops::RangeInclusive<i32> = (-5)..=256;
     const INT_CACHE_POOL_MIN: i32 = *Self::INT_CACHE_POOL_RANGE.start();
 
     #[must_use]
     pub fn genesis() -> &'static PyRc<Self> {
-        rustpython_common::static_cell! {
-            static CONTEXT: PyRc<Context>;
-        }
-        CONTEXT.get_or_init(|| {
+        GENESIS.get_or_init(|| {
             let ctx = PyRc::new(Self::init_genesis());
             // SAFETY: ctx is heap-allocated via PyRc and will be stored in
             // the CONTEXT static cell, so the Context lives for 'static.
@@ -300,6 +303,20 @@ impl Context {
             crate::exceptions::ExceptionZoo::extend(ctx_ref);
             ctx
         })
+    }
+
+    /// [`Self::genesis`] without initializing it: `None` while genesis is still
+    /// running.
+    ///
+    /// A drop path that wants to compare an object's type against a static type
+    /// must use this rather than `genesis()`: `init_genesis` itself drops objects
+    /// (strings among them), and their dealloc would re-enter `get_or_init` on
+    /// the same thread, which deadlocks the whole interpreter before `main` can
+    /// print anything. Reporting "not initialized yet" is also the right answer
+    /// there - nothing dropped mid-genesis can be a candidate for reuse.
+    #[must_use]
+    pub(crate) fn try_genesis() -> Option<&'static PyRc<Self>> {
+        GENESIS.get()
     }
 
     fn init_genesis() -> Self {

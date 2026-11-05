@@ -73,6 +73,10 @@
 //! * `strascii` - build an ASCII string by re-deriving its kind from bytes the
 //!   caller already proved ASCII, which prices the scans that
 //!   `StrData::from_known_ascii` now skips
+//! * `strfreelist` - refuse to recycle a dead `PyStr` husk, so every string goes
+//!   back through `malloc`/`free`. `HAS_FREELIST` is a compile-time const, and the
+//!   difference is ~30 ns per object at the probe but invisible across binaries,
+//!   so this bit is the only way to price it on real interpreter work
 //!
 //! `splbind`, `splpiece` and `spscan` change the answer, so they only fire on a
 //! receiver whose text starts with `LUNA_STUB_STR=<prefix>`: startup splits paths,
@@ -262,6 +266,14 @@ pub(crate) const ARM_RECURSION: u64 = 4398046511104;
 /// proven ASCII, so every scan here is work the caller did for free; the bit
 /// prices how much that was worth.
 pub(crate) const STR_KNOWN_ASCII: u64 = 8796093022208;
+/// Measurement only: makes `PyStr` behave as if it had no freelist - push
+/// refuses and pop misses, so every string husk goes through `malloc`/`free`
+/// again. `PyPayload::HAS_FREELIST` is a const, so without this bit the only way
+/// to compare the two is across binaries, and cross-binary deltas are swamped by
+/// code-layout noise; this fork already misled itself that way once, recording a
+/// string freelist as measured neutral when the interpreter-level probe could not
+/// see a per-object win that a same-binary probe shows plainly.
+pub(crate) const STR_FREELIST: u64 = 17592186044416;
 
 /// Measurement only: the qualified-name prefix whose function bodies are
 /// skipped, so one call splits into "dispatch, argument binding, frame entry
@@ -364,6 +376,7 @@ pub(crate) fn ablated(bit: u64) -> bool {
                     "armdata" => ARM_DATASTACK,
                     "armrecur" => ARM_RECURSION,
                     "strascii" => STR_KNOWN_ASCII,
+                    "strfreelist" => STR_FREELIST,
                     "armstage" => ARM_STAGE,
                     "argsslack" => ARGS_SLACK,
                     "microinline" => MICRO_INLINE,

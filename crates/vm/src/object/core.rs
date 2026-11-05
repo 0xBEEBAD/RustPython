@@ -257,7 +257,11 @@ pub(super) unsafe fn default_dealloc<T: PyPayload>(obj: *mut PyObject) {
     let typ = obj_ref.class();
     let pushed = if T::HAS_FREELIST
         && typ.heaptype_ext.is_none()
-        && core::ptr::eq(typ, T::class(crate::vm::Context::genesis()))
+        // `try_genesis`, not `genesis`: this runs while an object is being
+        // dropped, and `init_genesis` drops objects itself - re-entering the
+        // cell's `get_or_init` on that thread deadlocks the interpreter.
+        && matches!(crate::vm::Context::try_genesis(), Some(ctx)
+            if core::ptr::eq(typ, T::class(ctx)))
         && !obj_ref.0.ref_count.is_published()
     {
         unsafe { T::freelist_push(obj) }

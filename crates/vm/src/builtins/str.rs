@@ -2235,10 +2235,35 @@ pub(crate) fn encode_string(
     vm.state.codec_registry.encode_text(s, encoding, errors, vm)
 }
 
+thread_local! {
+    static STR_FREELIST: crate::object::FreeList<PyStr> = const { crate::object::FreeList::new() };
+}
+
 impl PyPayload for PyStr {
+    const MAX_FREELIST: usize = 100;
+    const HAS_FREELIST: bool = true;
+
     #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {
         ctx.types.str_type
+    }
+
+    #[inline]
+    unsafe fn freelist_push(obj: *mut PyObject) -> bool {
+        if crate::perf_debug::ablated(crate::perf_debug::STR_FREELIST) {
+            return false;
+        }
+        STR_FREELIST
+            .try_with(|fl| unsafe { fl.push(obj) })
+            .unwrap_or(false)
+    }
+
+    #[inline]
+    unsafe fn freelist_pop(_payload: &Self) -> Option<std::ptr::NonNull<PyObject>> {
+        if crate::perf_debug::ablated(crate::perf_debug::STR_FREELIST) {
+            return None;
+        }
+        STR_FREELIST.try_with(|fl| unsafe { fl.pop() }).ok().flatten()
     }
 }
 
@@ -3226,6 +3251,82 @@ mod tests {
     use super::*;
     use crate::Interpreter;
     use rustpython_common::wtf8::Wtf8Buf;
+
+    /// Measurement probe, not an assertion: where does a string object's *flat*
+    /// cost live? `bench/labs/strscale.py` says ~37 ns per object does not depend
+    /// on length and survives every interpreter-level ablation tried so far (husk
+    /// freelist, slim prefix, skipping destructors, the byte copy, the kind scan),
+    /// so this prices the steps directly instead of bisecting them with env bits
+    /// that each read neutral:
+    ///
+    ///   * `StrData` alone - buffer selection and the SSO copy;
+    ///   * object create + drop - what `ascii_piece` actually pays;
+    ///   * object create only (`forget`, so the freelist cannot recycle it, which
+    ///     is why its iteration count is far smaller);
+    ///   * an `int` create + drop, whose object prefix is 8 bytes instead of a
+    ///     string's 40-byte GC prefix - if the two are equal the cost belongs to
+    ///     the object model, not to strings.
+    ///
+    ///     cargo test --release -p rustpython-vm --lib -- --nocapture --ignored
+    #[test]
+    #[ignore = "release-only measurement probe"]
+    fn str_object_lifecycle_cost() {
+        use crate::builtins::PyInt;
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        fn timed<F: FnMut()>(iters: u32, mut f: F) -> f64 {
+            let mut best = f64::INFINITY;
+            for _ in 0..5 {
+                let start = Instant::now();
+                for _ in 0..iters {
+                    f();
+                }
+                let per = start.elapsed().as_secs_f64() * 1e9 / iters as f64;
+                best = best.min(per);
+            }
+            best
+        }
+
+        let ctx = Context::genesis();
+        for len in [4usize, 20] {
+            let bytes = vec![b'a'; len];
+            let data = timed(3_000_000, || {
+                drop(StrData::from_known_ascii(black_box(&bytes)));
+            });
+            let object = timed(2_000_000, || {
+                let obj: PyRef<PyStr> =
+                    PyStr::from(StrData::from_known_ascii(black_box(&bytes))).into_ref(&**ctx);
+                black_box(&obj);
+            });
+            let created_only = timed(150_000, || {
+                let obj: PyRef<PyStr> =
+                    PyStr::from(StrData::from_known_ascii(black_box(&bytes))).into_ref(&**ctx);
+                std::mem::forget(obj);
+            });
+            let int = timed(2_000_000, || {
+                let num: PyRef<PyInt> = ctx.new_int(black_box(len as i32));
+                black_box(&num);
+            });
+            // `new_int` answers small values from the cache, so the row above is
+            // a refcount bump, not an object lifecycle. This one is a real
+            // allocation of a *different* type: if it matches the string row the
+            // cost is the shared object path, and if it does not, the string's
+            // payload size is the suspect.
+            let cold_int = timed(2_000_000, || {
+                let num: PyRef<PyInt> = ctx.new_int(black_box(1_000_000 + len as i64));
+                black_box(&num);
+            });
+            println!(
+                "len={len:2}: StrData {data:5.1} ns | str create+drop {object:5.1} ns | \
+                 str create only {created_only:5.1} ns | int cached {int:5.1} ns | \
+                 int cold {cold_int:5.1} ns | sizes str={} data={} int={}",
+                std::mem::size_of::<PyStr>(),
+                std::mem::size_of::<StrData>(),
+                std::mem::size_of::<PyInt>(),
+            );
+        }
+    }
 
     #[test]
     fn str_title() {
