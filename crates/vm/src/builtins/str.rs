@@ -12,6 +12,7 @@ use crate::{
     anystr::{self, AnyStr, AnyStrContainer, AnyStrWrapper, StringRange, adjust_indices},
     atomic_func,
     bytes_inner::{swapcase_ascii, title_ascii},
+    codecs::{CodecArg, EncodeEncoding, EncodeErrors},
     cformat::cformat_string,
     class::PyClassImpl,
     common::{
@@ -1925,7 +1926,12 @@ impl PyStr {
 
     #[pymethod]
     fn encode(zelf: PyRef<Self>, args: EncodeArgs, vm: &VirtualMachine) -> PyResult<PyBytesRef> {
-        encode_string(zelf, args.encoding, args.errors, vm)
+        encode_string(
+            zelf,
+            args.encoding.into_option(),
+            args.errors.into_option(),
+            vm,
+        )
     }
 
     #[pymethod]
@@ -2172,10 +2178,10 @@ impl AsSequence for PyStr {
 
 #[derive(FromArgs)]
 struct EncodeArgs {
-    #[pyarg(any, default)]
-    encoding: Option<PyUtf8StrRef>,
-    #[pyarg(any, default)]
-    errors: Option<PyUtf8StrRef>,
+    #[pyarg(any, default = CodecArg::Absent)]
+    encoding: CodecArg<EncodeEncoding>,
+    #[pyarg(any, default = CodecArg::Absent)]
+    errors: CodecArg<EncodeErrors>,
 }
 
 pub(crate) fn encode_string(

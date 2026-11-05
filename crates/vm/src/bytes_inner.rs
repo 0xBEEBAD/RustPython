@@ -7,6 +7,7 @@ use crate::{
         pystr, pystr::PyUtf8StrRef,
     },
     byte::bytes_from_object,
+    codecs::{CodecArg, DecodeEncoding, DecodeErrors},
     cformat::cformat_bytes,
     common::hash,
     common::wtf8::is_py_ascii_whitespace,
@@ -1168,10 +1169,10 @@ impl AnyStr for [u8] {
 
 #[derive(FromArgs)]
 pub(crate) struct DecodeArgs {
-    #[pyarg(any, default)]
-    encoding: Option<PyUtf8StrRef>,
-    #[pyarg(any, default)]
-    errors: Option<PyUtf8StrRef>,
+    #[pyarg(any, default = CodecArg::Absent)]
+    encoding: CodecArg<DecodeEncoding>,
+    #[pyarg(any, default = CodecArg::Absent)]
+    errors: CodecArg<DecodeErrors>,
 }
 
 pub(crate) fn bytes_decode(
@@ -1180,6 +1181,7 @@ pub(crate) fn bytes_decode(
     vm: &VirtualMachine,
 ) -> PyResult<PyStrRef> {
     let DecodeArgs { encoding, errors } = args;
+    let (encoding, errors) = (encoding.into_option(), errors.into_option());
     // The utf-8/strict default of `bytes.decode()` is not a registry lookup any
     // more than `str.encode()`'s is, and a byte string that is already valid
     // UTF-8 decodes to exactly those bytes. Rust's validator rejects the same

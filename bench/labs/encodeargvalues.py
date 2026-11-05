@@ -43,3 +43,23 @@ show("s.encode('utf-8')", lambda: s.encode("utf-8"))
 show("s.encode('unknown-codec')", lambda: s.encode("unknown-codec"))
 show("s.encode(errors='unknown')", lambda: s.encode(errors="unknown"))
 show("b.decode('unknown-codec')", lambda: b.decode("unknown-codec"))
+
+# The same clinic converter guards the constructors, the module-level codec
+# functions and codecs.lookup's message, so measure those too instead of
+# assuming they agree with the two methods above. `open(encoding=None)` is the
+# deliberate opposite case: there None really does mean "locale default".
+import codecs  # noqa: E402
+
+show("codecs.lookup('unknown-codec')", lambda: codecs.lookup("unknown-codec"))
+show("str('abc', None)", lambda: str("abc", None))
+show("str('abc', 'utf-8', None)", lambda: str("abc", "utf-8", None))
+show("str('abc', errors=None)", lambda: str("abc", errors=None))
+show("bytes('abc', None)", lambda: bytes("abc", None))
+show("bytes('abc', 'utf-8', None)", lambda: bytes("abc", "utf-8", None))
+show("bytearray('abc', None)", lambda: bytearray("abc", None))
+show("bytearray('abc', errors=None)", lambda: bytearray("abc", errors=None))
+show("codecs.encode('abc', None)", lambda: codecs.encode("abc", None))
+show("codecs.encode('abc', 'utf-8', None)", lambda: codecs.encode("abc", "utf-8", None))
+show("codecs.decode(b'abc', None)", lambda: codecs.decode(b"abc", None))
+show("open(encoding=None, errors=None)", lambda: open(
+    "bench/labs/encodeargvalues.py", encoding=None, errors=None).read(2))

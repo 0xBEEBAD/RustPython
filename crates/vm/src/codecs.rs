@@ -1,4 +1,5 @@
 use alloc::borrow::Cow;
+use core::marker::PhantomData;
 use core::ops::{Deref, Range};
 use std::collections::HashMap;
 
@@ -24,6 +25,80 @@ use crate::{
     convert::ToPyObject,
     function::{ArgBytesLike, PyMethodDef},
 };
+
+/// Which codec method an `encoding`/`errors` argument belongs to. CPython's
+/// generated clinic parsers hand both strings to `_PyArg_BadArgument`
+/// (Python/getargs.c), which formats
+/// `"{fn}() argument '{param}' must be str, not {type}"` and spells `None` as
+/// `None` rather than by its type's name, so a rejection has to know both.
+pub(crate) trait CodecParam: 'static {
+    const FN: &'static str;
+    const PARAM: &'static str;
+}
+
+/// The `encoding` and `errors` parameters of the codec methods, spelled the way
+/// CPython's Argument Clinic declares them: a `str`, where only an *absent*
+/// argument falls back to the method's own default. An explicit `None` is a type
+/// error like any other wrong type - the fork used to read it as "not given",
+/// which quietly accepted `b"abc".decode(None)`.
+pub(crate) enum CodecArg<T: CodecParam> {
+    Absent,
+    Given(PyUtf8StrRef, PhantomData<T>),
+}
+
+pub(crate) struct EncodeEncoding;
+impl CodecParam for EncodeEncoding {
+    const FN: &'static str = "encode";
+    const PARAM: &'static str = "encoding";
+}
+
+pub(crate) struct EncodeErrors;
+impl CodecParam for EncodeErrors {
+    const FN: &'static str = "encode";
+    const PARAM: &'static str = "errors";
+}
+
+pub(crate) struct DecodeEncoding;
+impl CodecParam for DecodeEncoding {
+    const FN: &'static str = "decode";
+    const PARAM: &'static str = "encoding";
+}
+
+pub(crate) struct DecodeErrors;
+impl CodecParam for DecodeErrors {
+    const FN: &'static str = "decode";
+    const PARAM: &'static str = "errors";
+}
+
+impl<T: CodecParam> CodecArg<T> {
+    /// The `None`-means-default shape the codec bodies already take.
+    pub(crate) fn into_option(self) -> Option<PyUtf8StrRef> {
+        match self {
+            Self::Absent => None,
+            Self::Given(value, _) => Some(value),
+        }
+    }
+}
+
+impl<'a, T: CodecParam> TryFromBorrowedObject<'a> for CodecArg<T> {
+    fn try_from_borrowed_object(vm: &VirtualMachine, obj: &'a PyObject) -> PyResult<Self> {
+        match PyUtf8StrRef::try_from_object(vm, obj.to_owned()) {
+            Ok(value) => Ok(Self::Given(value, PhantomData)),
+            Err(_) => {
+                let shown = if obj.class().is(vm.ctx.types.none_type) {
+                    "None".to_owned()
+                } else {
+                    obj.class().name().to_owned()
+                };
+                Err(vm.new_type_error(format!(
+                    "{}() argument '{}' must be str, not {shown}",
+                    T::FN,
+                    T::PARAM
+                )))
+            }
+        }
+    }
+}
 
 pub struct CodecsRegistry {
     inner: PyRwLock<RegistryInner>,
@@ -242,6 +317,10 @@ impl CodecsRegistry {
     }
 
     pub fn lookup(&self, encoding: &str, vm: &VirtualMachine) -> PyResult<PyCodec> {
+        // CPython normalizes only to *find* a codec; the LookupError repeats the
+        // name the caller wrote, so `unknown-codec` must not come back as
+        // `unknown_codec`.
+        let given = encoding;
         let encoding = normalize_encoding_name(encoding);
         let search_path = {
             let inner = self.inner.read();
@@ -267,7 +346,7 @@ impl CodecsRegistry {
             }
         }
 
-        Err(vm.new_lookup_error(format!("unknown encoding: {encoding}")))
+        Err(vm.new_lookup_error(format!("unknown encoding: {given}")))
     }
 
     fn _lookup_text_encoding(
