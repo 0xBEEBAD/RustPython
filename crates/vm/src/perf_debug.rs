@@ -66,6 +66,10 @@
 //! * `spscan` - the same loop skips both the occurrence count and the split
 //!   iterator and cuts two pieces out of the whole receiver, separating the scan
 //!   from the allocation it feeds
+//! * `armdata` / `armrecur` - split the exact-args kernel's `armguards` cost into
+//!   the datastack-space check (whose frame size is recomputed per call from the
+//!   code object) and the recursion-depth check, so a fix targets the one that
+//!   pays rather than the pair
 //!
 //! `splbind`, `splpiece` and `spscan` change the answer, so they only fire on a
 //! receiver whose text starts with `LUNA_STUB_STR=<prefix>`: startup splits paths,
@@ -236,6 +240,18 @@ pub(crate) const SPL_SCAN: u64 = 549755813888;
 /// cost into constructor and destructor. It leaks the pieces on purpose, which
 /// is why it is an instrument and not a feature.
 pub(crate) const SPL_NODESTROY: u64 = 1099511627776;
+/// Measurement only: `armguards` covers the two eligibility checks the exact-args
+/// call kernel runs before staging arguments; this skips only the datastack-space
+/// one, whose frame size is recomputed from the code object's fields on every
+/// call. Read against `armrecur` it says which of the two the ~7 ns belongs to.
+/// Never enable while running real code: without this check a wide callee frame
+/// can overrun the data stack.
+pub(crate) const ARM_DATASTACK: u64 = 2199023255552;
+/// Measurement only: the companion of `armdata` - skips the recursion-depth
+/// check alone, which is two `Cell` reads and a compare.
+/// Never enable while running real code: it is what stops a deep call from
+/// overrunning the native stack.
+pub(crate) const ARM_RECURSION: u64 = 4398046511104;
 
 /// Measurement only: the qualified-name prefix whose function bodies are
 /// skipped, so one call splits into "dispatch, argument binding, frame entry
@@ -335,6 +351,8 @@ pub(crate) fn ablated(bit: u64) -> bool {
                     "noenter" => NO_ENTER,
                     "defbind" => DEF_BIND,
                     "armguards" => ARM_GUARDS,
+                    "armdata" => ARM_DATASTACK,
+                    "armrecur" => ARM_RECURSION,
                     "armstage" => ARM_STAGE,
                     "argsslack" => ARGS_SLACK,
                     "microinline" => MICRO_INLINE,

@@ -6597,10 +6597,14 @@ impl ExecutingFrame<'_> {
                         return Ok(None);
                     }
                     if !crate::perf_debug::ablated(crate::perf_debug::ARM_GUARDS) {
-                        if !self.specialization_has_datastack_space_for_func(vm, func) {
+                        if !crate::perf_debug::ablated(crate::perf_debug::ARM_DATASTACK)
+                            && !self.specialization_has_datastack_space_for_func(vm, func)
+                        {
                             return self.execute_call_vectorcall(nargs, vm);
                         }
-                        if self.specialization_call_recursion_guard(vm) {
+                        if !crate::perf_debug::ablated(crate::perf_debug::ARM_RECURSION)
+                            && self.specialization_call_recursion_guard(vm)
+                        {
                             return self.execute_call_vectorcall(nargs, vm);
                         }
                         if self.tailcall_enabled
