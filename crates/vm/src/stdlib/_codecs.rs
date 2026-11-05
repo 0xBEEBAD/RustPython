@@ -42,15 +42,15 @@ mod _codecs {
     }
 
     #[derive(FromArgs)]
-    struct CodeArgs {
+    struct CodeArgs<E: codecs::CodecParam, R: codecs::CodecParam> {
         obj: PyObjectRef,
-        #[pyarg(any, optional)]
-        encoding: Option<PyUtf8StrRef>,
-        #[pyarg(any, optional)]
-        errors: Option<PyUtf8StrRef>,
+        #[pyarg(any, default = codecs::CodecArg::Absent)]
+        encoding: codecs::CodecArg<E>,
+        #[pyarg(any, default = codecs::CodecArg::Absent)]
+        errors: codecs::CodecArg<R>,
     }
 
-    impl CodeArgs {
+    impl<E: codecs::CodecParam, R: codecs::CodecParam> CodeArgs<E, R> {
         fn apply(
             self,
             vm: &VirtualMachine,
@@ -62,27 +62,33 @@ mod _codecs {
                 &VirtualMachine,
             ) -> PyResult,
         ) -> PyResult {
-            let encoding = self
-                .encoding
+            let given = self.encoding.into_option();
+            let encoding = given
                 .as_deref()
                 .map_or(codecs::DEFAULT_ENCODING, |s| s.as_str());
             f(
                 &vm.state.codec_registry,
                 self.obj,
                 encoding,
-                self.errors,
+                self.errors.into_option(),
                 vm,
             )
         }
     }
 
     #[pyfunction]
-    fn encode(args: CodeArgs, vm: &VirtualMachine) -> PyResult {
+    fn encode(
+        args: CodeArgs<codecs::EncodeEncoding, codecs::EncodeErrors>,
+        vm: &VirtualMachine,
+    ) -> PyResult {
         args.apply(vm, codecs::CodecsRegistry::encode)
     }
 
     #[pyfunction]
-    fn decode(args: CodeArgs, vm: &VirtualMachine) -> PyResult {
+    fn decode(
+        args: CodeArgs<codecs::DecodeEncoding, codecs::DecodeErrors>,
+        vm: &VirtualMachine,
+    ) -> PyResult {
         args.apply(vm, codecs::CodecsRegistry::decode)
     }
 

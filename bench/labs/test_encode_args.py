@@ -18,6 +18,7 @@ table is faithful, and running it under rustpython proves the behaviour.
     target/release/rustpython.exe     bench/labs/test_encode_args.py
 """
 
+import codecs as _codecs
 import sys
 
 failures = []
@@ -51,6 +52,51 @@ CASES = [
     ("b.decode('utf-8', None)", lambda: b"abc".decode("utf-8", None), err("decode", "None")),
     ("ba.decode(None)", lambda: bytearray(b"abc").decode(None), enc("decode", "None")),
     ("ba.decode(errors=None)", lambda: bytearray(b"abc").decode(errors=None), err("decode", "None")),
+    # codecs.encode / codecs.decode run through the same clinic converter, so
+    # they reject None the same way and name themselves, not the methods.
+    (
+        "codecs.encode('abc', None)",
+        lambda: _codecs.encode("abc", None),
+        enc("encode", "None"),
+    ),
+    (
+        "codecs.encode('abc', encoding=None)",
+        lambda: _codecs.encode("abc", encoding=None),
+        enc("encode", "None"),
+    ),
+    (
+        "codecs.encode('abc', errors=None)",
+        lambda: _codecs.encode("abc", errors=None),
+        err("encode", "None"),
+    ),
+    (
+        "codecs.encode('abc', 'utf-8', None)",
+        lambda: _codecs.encode("abc", "utf-8", None),
+        err("encode", "None"),
+    ),
+    ("codecs.encode('abc', 1)", lambda: _codecs.encode("abc", 1), enc("encode", "int")),
+    (
+        "codecs.decode(b'abc', None)",
+        lambda: _codecs.decode(b"abc", None),
+        enc("decode", "None"),
+    ),
+    (
+        "codecs.decode(b'abc', encoding=None)",
+        lambda: _codecs.decode(b"abc", encoding=None),
+        enc("decode", "None"),
+    ),
+    (
+        "codecs.decode(b'abc', errors=None)",
+        lambda: _codecs.decode(b"abc", errors=None),
+        err("decode", "None"),
+    ),
+    (
+        "codecs.decode(b'abc', 'utf-8', None)",
+        lambda: _codecs.decode(b"abc", "utf-8", None),
+        err("decode", "None"),
+    ),
+    ("codecs.encode('abc')", lambda: _codecs.encode("abc"), "ok: b'abc'"),
+    ("codecs.decode(b'abc')", lambda: _codecs.decode(b"abc"), "ok: 'abc'"),
     # Controls that must keep passing: an unknown *handler* name is not looked up
     # until an error actually happens, so it is accepted, and the LookupError for
     # an unknown codec has to name it exactly as it was written, not normalized.

@@ -63,3 +63,20 @@ show("codecs.encode('abc', 'utf-8', None)", lambda: codecs.encode("abc", "utf-8"
 show("codecs.decode(b'abc', None)", lambda: codecs.decode(b"abc", None))
 show("open(encoding=None, errors=None)", lambda: open(
     "bench/labs/encodeargvalues.py", encoding=None, errors=None).read(2))
+
+# Measured on the reference: for `str()` the POSITIONAL form reports `NoneType`
+# while the KEYWORD form reports `None`, so the split may be by *how* the
+# argument was passed rather than by which parameter it is. Map both paths for
+# every entry point before writing any message.
+show("str('abc', encoding=None)", lambda: str("abc", encoding=None))
+show("bytes('abc', encoding=None)", lambda: bytes("abc", encoding=None))
+show("bytes('abc', errors=None)", lambda: bytes("abc", errors=None))
+show("bytearray('abc', encoding=None)", lambda: bytearray("abc", encoding=None))
+show("codecs.encode('abc', encoding=None)", lambda: codecs.encode("abc", encoding=None))
+show("codecs.encode('abc', errors=None)", lambda: codecs.encode("abc", errors=None))
+show("codecs.decode(b'abc', encoding=None)", lambda: codecs.decode(b"abc", encoding=None))
+show("codecs.decode(b'abc', errors=None)", lambda: codecs.decode(b"abc", errors=None))
+show("codecs.decode(b'abc', 'utf-8', None)", lambda: codecs.decode(b"abc", "utf-8", None))
+show("str('abc', 1)", lambda: str("abc", 1))
+show("bytes('abc', 1)", lambda: bytes("abc", 1))
+show("codecs.encode('abc', 1)", lambda: codecs.encode("abc", 1))
