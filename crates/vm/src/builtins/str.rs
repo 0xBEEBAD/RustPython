@@ -2253,6 +2253,7 @@ thread_local! {
 impl PyPayload for PyStr {
     const MAX_FREELIST: usize = 100;
     const HAS_FREELIST: bool = true;
+    const SLIM_HEADER: bool = true;
 
     #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {
