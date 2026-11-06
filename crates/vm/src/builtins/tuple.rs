@@ -319,6 +319,37 @@ impl PyTuple<PyObjectRef> {
         }
     }
 
+    /// `+` for a tuple, including the try at the right operand's `__radd__`
+    /// that CPython makes before it gives up.
+    ///
+    /// Struct sequences call this on their visible view, so the rule for a
+    /// plain tuple and the rule for a struct sequence cannot drift apart.
+    pub(crate) fn number_add(
+        zelf: PyRef<Self>,
+        other: PyObjectRef,
+        vm: &VirtualMachine,
+    ) -> PyResult {
+        match Self::__add__(zelf.clone(), other.clone(), vm) {
+            PyArithmeticValue::Implemented(tuple) => Ok(tuple.into()),
+            // CPython gives tuple no `nb_add` at all: `PyNumber_Add`
+            // reaches `tuple_concat` - the function our `tuple.__add__`
+            // attribute is, and which refuses a non-tuple - only after
+            // the right operand's `__radd__` has declined. A heap
+            // subclass inherits its `nb_add` from that attribute, so
+            // `TupleSub([...]) + x` never asked `x.__radd__` until this
+            // slot started taking the chance itself.
+            PyArithmeticValue::NotImplemented => {
+                if let Some(radd) = vm.get_method(other.clone(), identifier!(vm, __radd__)) {
+                    let result = radd?.call((zelf.as_object().to_owned(),), vm)?;
+                    if !result.is(&vm.ctx.not_implemented()) {
+                        return Ok(result);
+                    }
+                }
+                Err(vm.new_concat_error("tuple", &other))
+            }
+        }
+    }
+
     /// Creating a new tuple with given boxed slice.
     /// NOTE: for usual case, you probably want to use PyTuple::new_ref.
     /// Calling this function implies trying micro optimization for non-zero-sized tuple.
@@ -376,6 +407,18 @@ impl<T> PyTuple<PyRef<T>> {
     }
 }
 
+/// How many leading items of a tuple operand `+` may use.
+///
+/// A struct sequence keeps its hidden fields in the body, while CPython's
+/// `Py_SIZE` stops at the visible ones, so a body read has to stop there too.
+/// An exact tuple is the common case and never pays for the attribute lookup.
+fn visible_item_count(obj: &PyObject, len: usize, vm: &VirtualMachine) -> usize {
+    if obj.class().is(vm.ctx.types.tuple_type) {
+        return len;
+    }
+    crate::types::visible_len_if_structseq(obj, vm).unwrap_or(len)
+}
+
 #[pyclass(
     itemsize = core::mem::size_of::<crate::PyObjectRef>(),
     flags(BASETYPE, SEQUENCE, _MATCH_SELF),
@@ -393,9 +436,12 @@ impl PyTuple {
             } else if zelf.elements.is_empty() && other.class().is(vm.ctx.types.tuple_type) {
                 other
             } else {
+                let left = visible_item_count(zelf.as_object(), zelf.len(), vm);
+                let right = visible_item_count(other.as_object(), other.len(), vm);
                 let elements = zelf
                     .iter()
-                    .chain(other.as_slice())
+                    .take(left)
+                    .chain(other.iter().take(right))
                     .cloned()
                     .collect::<Box<[_]>>();
                 Self {
@@ -408,9 +454,10 @@ impl PyTuple {
     }
 
     #[pymethod]
-    fn count(&self, needle: PyObjectRef, vm: &VirtualMachine) -> PyResult<usize> {
+    fn count(zelf: PyRef<Self>, needle: PyObjectRef, vm: &VirtualMachine) -> PyResult<usize> {
+        let visible = visible_item_count(zelf.as_object(), zelf.len(), vm);
         let mut count: usize = 0;
-        for element in self {
+        for element in zelf.iter().take(visible) {
             if vm.identical_or_equal(element, &needle)? {
                 count += 1;
             }
@@ -450,13 +497,14 @@ impl PyTuple {
 
     #[pymethod]
     fn index(
-        &self,
+        zelf: PyRef<Self>,
         needle: PyObjectRef,
         range: OptionalRangeArgs,
         vm: &VirtualMachine,
     ) -> PyResult<usize> {
-        let (start, stop) = range.saturate(self.len(), vm)?;
-        for (index, element) in self.elements.iter().enumerate().take(stop).skip(start) {
+        let visible = visible_item_count(zelf.as_object(), zelf.len(), vm);
+        let (start, stop) = range.saturate(visible, vm)?;
+        for (index, element) in zelf.iter().enumerate().take(stop).skip(start) {
             if vm.identical_or_equal(element, &needle)? {
                 return Ok(index);
             }
@@ -584,25 +632,7 @@ impl AsNumber for PyTuple {
                 let Some(a) = a.downcast_ref::<PyTuple>() else {
                     return Ok(vm.ctx.not_implemented());
                 };
-                match PyTuple::__add__(a.to_owned(), b.to_owned(), vm) {
-                    PyArithmeticValue::Implemented(tuple) => Ok(tuple.into()),
-                    // CPython gives tuple no `nb_add` at all: `PyNumber_Add`
-                    // reaches `tuple_concat` - the function our `tuple.__add__`
-                    // attribute is, and which refuses a non-tuple - only after
-                    // the right operand's `__radd__` has declined. A heap
-                    // subclass inherits its `nb_add` from that attribute, so
-                    // `TupleSub([...]) + x` never asked `x.__radd__` until this
-                    // slot started taking the chance itself.
-                    PyArithmeticValue::NotImplemented => {
-                        if let Some(radd) = vm.get_method(b.to_owned(), identifier!(vm, __radd__)) {
-                            let result = radd?.call((a.to_owned(),), vm)?;
-                            if !result.is(&vm.ctx.not_implemented()) {
-                                return Ok(result);
-                            }
-                        }
-                        Err(vm.new_concat_error("tuple", b))
-                    }
-                }
+                PyTuple::number_add(a.to_owned(), b.to_owned(), vm)
             }),
             ..PyNumberMethods::NOT_IMPLEMENTED
         };

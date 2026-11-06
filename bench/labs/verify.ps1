@@ -8,7 +8,15 @@ param(
     [string[]]$Tests = @(
         'test_gc', 'test_frame', 'test_generators', 'test_threading',
         'test_sys', 'test_traceback', 'test_weakref', 'test_faulthandler',
-        'test_exceptions', 'test_asyncio'
+        'test_exceptions', 'test_asyncio',
+        # Object-model and codec work needs coverage here: the freelist and the
+        # structseq/struct-time layout both passed a gate that omitted these, so
+        # byte/string/dict construction and the codec argument paths are now
+        # always exercised.
+        'test_bytes', 'test_codecs', 'test_dict', 'test_builtin', 'test_time',
+        # struct_time is a tuple whose body is longer than it shows, and `+`
+        # reads that body; only this module watches the visible-field rule.
+        'test_structseq'
     ),
     [int]$Jobs = 6
 )

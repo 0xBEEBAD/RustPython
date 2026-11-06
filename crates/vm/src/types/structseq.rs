@@ -138,31 +138,55 @@ fn get_visible_len(obj: &PyObject, vm: &VirtualMachine) -> PyResult<usize> {
         .try_into_value(vm)
 }
 
+/// How many of an object's tuple items sequence operations may see, or `None`
+/// if the object is not a struct sequence and all of them are visible.
+///
+/// CPython encodes this in `Py_SIZE` (`#define VISIBLE_SIZE(op) Py_SIZE(op)`),
+/// so the tuple slots a struct sequence inherits are right without ever
+/// hearing of struct sequences. Our body really does hold all `n_fields`, so
+/// whoever reads it has to cut it down -- including when a struct sequence is
+/// the *right* operand of `+`, where no slot of its own is consulted.
+pub(crate) fn visible_len_if_structseq(obj: &PyObject, vm: &VirtualMachine) -> Option<usize> {
+    obj.class()
+        .get_attr(identifier!(vm.ctx, n_sequence_fields))
+        .and_then(|value| value.try_into_value(vm).ok())
+}
+
+/// The visible fields as a plain tuple, which every inherited tuple slot
+/// understands without knowing anything about struct sequences.
+///
+/// CPython keeps the hidden fields past `Py_SIZE`, in the room its type's
+/// extra `tp_basicsize` reserves (`Objects/structseq.c`:
+/// `#define VISIBLE_SIZE(op) Py_SIZE(op)`), so a structseq's own `ob_size`
+/// already is `n_sequence_fields` and no slot needs cutting. Our body really
+/// does hold all `n_fields`, so each slot that reads it has to slice first.
+fn visible_body(obj: &PyObject, vm: &VirtualMachine) -> PyResult<PyTupleRef> {
+    let n_seq = get_visible_len(obj, vm)?;
+    let tuple = obj
+        .downcast_ref::<PyTuple>()
+        .ok_or_else(|| vm.new_type_error("unexpected payload for struct sequence"))?;
+    Ok(PyTuple::new_ref(
+        tuple.iter().take(n_seq).cloned().collect(),
+        &vm.ctx,
+    ))
+}
+
 /// Sequence methods for struct sequences.
 /// Uses n_sequence_fields to determine visible length.
 static STRUCT_SEQUENCE_AS_SEQUENCE: LazyLock<PySequenceMethods> =
     LazyLock::new(|| PySequenceMethods {
         length: atomic_func!(|seq, vm| get_visible_len(seq.obj, vm)),
         concat: atomic_func!(|seq, other, vm| {
-            // Convert to visible-only tuple, then use regular tuple concat
-            let n_seq = get_visible_len(seq.obj, vm)?;
-            let tuple = seq.obj.downcast_ref::<PyTuple>().unwrap();
-            let visible: Vec<_> = tuple.iter().take(n_seq).cloned().collect();
-            let visible_tuple = PyTuple::new_ref(visible, &vm.ctx);
-            // Use tuple's concat implementation
-            visible_tuple
+            visible_body(seq.obj, vm)?
                 .as_object()
                 .sequence_unchecked()
                 .concat(other, vm)
         }),
         repeat: atomic_func!(|seq, n, vm| {
-            // Convert to visible-only tuple, then use regular tuple repeat
-            let n_seq = get_visible_len(seq.obj, vm)?;
-            let tuple = seq.obj.downcast_ref::<PyTuple>().unwrap();
-            let visible: Vec<_> = tuple.iter().take(n_seq).cloned().collect();
-            let visible_tuple = PyTuple::new_ref(visible, &vm.ctx);
-            // Use tuple's repeat implementation
-            visible_tuple.as_object().sequence_unchecked().repeat(n, vm)
+            visible_body(seq.obj, vm)?
+                .as_object()
+                .sequence_unchecked()
+                .repeat(n, vm)
         }),
         item: atomic_func!(|seq, i, vm| {
             let n_seq = get_visible_len(seq.obj, vm)?;
@@ -426,6 +450,13 @@ pub trait PyStructSequence: StaticType + PyClassImpl + Sized + 'static {
             .as_mapping
             .copy_from(&STRUCT_SEQUENCE_AS_MAPPING);
 
+        // `+` asks `nb_add`, not `sq_concat`, and the inherited tuple one reads
+        // the raw body -- so slicing only as_sequence above would still let the
+        // hidden fields show through the operator.
+        class.slots.as_number.add.store(Some(|a, b, vm| {
+            PyTuple::number_add(visible_body(a, vm)?, b.to_owned(), vm)
+        }));
+
         // Override iter slot to return only visible elements
         class.slots.iter.store(Some(struct_sequence_iter));
 
@@ -456,13 +487,7 @@ pub trait PyStructSequence: StaticType + PyClassImpl + Sized + 'static {
 
 /// Iterator function for struct sequences - returns only visible elements
 fn struct_sequence_iter(zelf: PyObjectRef, vm: &VirtualMachine) -> PyResult {
-    let tuple = zelf
-        .downcast_ref::<PyTuple>()
-        .ok_or_else(|| vm.new_type_error("expected tuple"))?;
-    let n_seq = get_visible_len(&zelf, vm)?;
-    let visible: Vec<_> = tuple.iter().take(n_seq).cloned().collect();
-    let visible_tuple = PyTuple::new_ref(visible, &vm.ctx);
-    visible_tuple
+    visible_body(&zelf, vm)?
         .as_object()
         .to_owned()
         .get_iter(vm)
@@ -474,14 +499,7 @@ fn struct_sequence_hash(
     zelf: &PyObject,
     vm: &VirtualMachine,
 ) -> PyResult<crate::common::hash::PyHash> {
-    let tuple = zelf
-        .downcast_ref::<PyTuple>()
-        .ok_or_else(|| vm.new_type_error("expected tuple"))?;
-    let n_seq = get_visible_len(zelf, vm)?;
-    // Create a visible-only tuple and hash it
-    let visible: Vec<_> = tuple.iter().take(n_seq).cloned().collect();
-    let visible_tuple = PyTuple::new_ref(visible, &vm.ctx);
-    visible_tuple.as_object().hash(vm)
+    visible_body(zelf, vm)?.as_object().hash(vm)
 }
 
 /// Rich comparison for struct sequences - compares only visible elements
