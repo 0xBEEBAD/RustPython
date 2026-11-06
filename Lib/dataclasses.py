@@ -798,11 +798,7 @@ def _get_type_from_annotation(annotation, cls):
     if _MODULE_IDENTIFIER_RE is None:
         _MODULE_IDENTIFIER_RE = re.compile(r'^\s*(\w+(?:\s*\.\s*\w+)*)')
 
-    # TODO: RUSTPYTHON; Pattern.prefixmatch (the 3.15 name for Pattern.match,
-    # which CPython defines as `match = prefixmatch`) is not implemented in
-    # RustPython's Rust _sre, and using it here would crash every module that
-    # decorates a dataclass with a string annotation at import time.
-    match = _MODULE_IDENTIFIER_RE.match(annotation)
+    match = _MODULE_IDENTIFIER_RE.prefixmatch(annotation)
     if not match:
         return None
 

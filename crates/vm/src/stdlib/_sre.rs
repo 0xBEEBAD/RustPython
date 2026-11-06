@@ -389,6 +389,18 @@ mod _sre {
             PyBuffer::try_from_borrowed_object(vm, string)?.contiguous_or_collect(f)
         }
 
+        /// 3.15's real name for this method; `match` is the alias (Modules/_sre/sre.c
+        /// says "match reuses the prefixmatch Clinic-generated parser and impl"),
+        /// so both must exist and answer identically.
+        #[pymethod]
+        fn prefixmatch(
+            zelf: PyRef<Self>,
+            string_args: StringArgs,
+            vm: &VirtualMachine,
+        ) -> PyResult<Option<PyRef<Match>>> {
+            Self::py_match(zelf, string_args, vm)
+        }
+
         #[pymethod(name = "match")]
         fn py_match(
             zelf: PyRef<Self>,
@@ -1059,6 +1071,11 @@ mod _sre {
         #[pygetset]
         fn pattern(&self) -> PyRef<Pattern> {
             self.pattern.clone()
+        }
+
+        #[pymethod]
+        fn prefixmatch(&self, vm: &VirtualMachine) -> PyResult<Option<PyRef<Match>>> {
+            Self::py_match(self, vm)
         }
 
         #[pymethod(name = "match")]
