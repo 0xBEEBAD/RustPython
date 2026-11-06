@@ -344,10 +344,26 @@ impl GcState {
         obj_ref.set_gc_tracked();
         obj_ref.set_gc_generation(0);
 
+        if crate::perf_debug::ablated(crate::perf_debug::EXC_GCNOLOCK) {
+            // SAFETY: measurement only, and only meaningful while exactly one
+            // thread can reach the collector. The list is mutated without the
+            // lock so that the acquire and the release drop out of what is
+            // being measured; everything else the real path does is repeated
+            // here unchanged.
+            let list = unsafe { &mut *self.generation_lists[0].data_ptr() };
+            list.push_front(obj);
+            let count = self.generations[0].count.load(Ordering::Relaxed);
+            self.generations[0]
+                .count
+                .store(count + 1, Ordering::Relaxed);
+            return;
+        }
         let mut list = self.generation_lists[0].write();
         if crate::perf_debug::ablated(crate::perf_debug::EXC_GCQUEUE) {
             let count = self.generations[0].count.load(Ordering::Relaxed);
-            self.generations[0].count.store(count + 1, Ordering::Relaxed);
+            self.generations[0]
+                .count
+                .store(count + 1, Ordering::Relaxed);
             return;
         }
         list.push_front(obj);
@@ -381,6 +397,25 @@ impl GcState {
                 return; // GC_UNTRACKED or unknown — already untracked
             };
 
+            if crate::perf_debug::ablated(crate::perf_debug::EXC_GCNOLOCK) {
+                // SAFETY: as in `track_object` - single-threaded measurement
+                // only. The node is still removed and the flags still cleared,
+                // so what this takes away is the acquire and the release and
+                // nothing else. No re-check under lock is needed because
+                // promotion cannot happen while one thread is the only mutator.
+                let list = unsafe { &mut *list_lock.data_ptr() };
+                if unsafe { list.remove(obj) }.is_some() && obj_gen == 0 {
+                    let count = self.generations[0].count.load(Ordering::Relaxed);
+                    if count > 0 {
+                        self.generations[0]
+                            .count
+                            .store(count - 1, Ordering::Relaxed);
+                    }
+                }
+                obj_ref.clear_gc_tracked();
+                obj_ref.set_gc_generation(GC_UNTRACKED);
+                return;
+            }
             let mut list = list_lock.write();
             // Re-check generation under lock (may have changed due to promotion)
             if obj_ref.gc_generation() != obj_gen {

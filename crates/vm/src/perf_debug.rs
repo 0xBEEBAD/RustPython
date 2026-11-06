@@ -229,6 +229,15 @@ pub(crate) const EXC_SYNCFLOT: u64 = 562949953421312;
 /// of touching the list nodes, the remainder is the lock. Never enable while
 /// running real code: the collector then sees nothing to collect.
 pub(crate) const EXC_GCQUEUE: u64 = 1125899906842624;
+/// Measurement only, and only on a single-threaded workload: keep everything
+/// `EXC_GCQUEUE` keeps but step around the generation-list lock itself, so
+/// what is left is the list write plus the header flags and the counter, with
+/// no acquire and no release. `excgctrack` says tracking as a whole is worth
+/// 3.2 % and `excgcqueue` says the list write is worth none of it, so this is
+/// the bit that decides whether the money is in the lock. Never combine with
+/// threads - it mutates shared state without synchronizing, which is only a
+/// question to ask on one thread.
+pub(crate) const EXC_GCNOLOCK: u64 = 2251799813685248;
 /// Measurement only: answer `None` from the specialized no-argument
 /// method-descriptor call without running the callee, which prices the dispatch
 /// arm itself - guards, argument vector, call context, stack moves - against the
@@ -426,6 +435,7 @@ pub(crate) fn ablated(bit: u64) -> bool {
                     "excgctrack" => EXC_GCTRACK,
                     "excsyncflot" => EXC_SYNCFLOT,
                     "excgcqueue" => EXC_GCQUEUE,
+                    "excgcnolock" => EXC_GCNOLOCK,
                     "mdstub" => MD_STUB,
                     "mdctx" => MD_CTX,
                     "mdarm" => MD_ARM,
