@@ -55,4 +55,3 @@ The sqlite3 module is written by Gerhard Häring <gh@ghaering.de>.
 """
 
 from sqlite3.dbapi2 import *
-from sqlite3.dump import _iterdump

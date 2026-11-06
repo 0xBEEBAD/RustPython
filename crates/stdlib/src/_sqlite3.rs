@@ -1627,7 +1627,13 @@ mod _sqlite3 {
 
         #[pymethod]
         fn iterdump(zelf: PyRef<Self>, args: IterdumpArgs, vm: &VirtualMachine) -> PyResult {
-            let module = vm.import("sqlite3.dump", 0)?;
+            // `vm.import` returns the top-level module (the same reason
+            // crates/stdlib/src/array.rs:1726 takes `abc` off `collections`),
+            // and 3.15 keeps `_iterdump` only in `sqlite3.dump` - it dropped
+            // the `sqlite3._iterdump` re-export, so the submodule has to be
+            // reached through the package.
+            let sqlite3 = vm.import("sqlite3.dump", 0)?;
+            let module = sqlite3.get_attr("dump", vm)?;
             let func = module.get_attr("_iterdump", vm)?;
             match args.filter {
                 OptionalArg::Missing => func.call((zelf,), vm),
