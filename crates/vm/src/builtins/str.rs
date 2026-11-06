@@ -204,6 +204,14 @@ impl Wtf8Concat for Py<PyStr> {
 /// cache, short pieces live in the header, longer ones get a single box.
 #[inline]
 fn ascii_piece(piece: &[u8], vm: &VirtualMachine) -> PyObjectRef {
+    // CPython answers a zero-length result with `_PyUnicode_GetEmpty()` inside
+    // `PyUnicode_New` (Objects/unicodeobject.c), so an empty piece is the
+    // interned singleton and no object is created at all. Building a husk
+    // instead costs a whole string lifecycle and shows up from Python as
+    // `"a,,b".split(",")[1] is ''` being False.
+    if piece.is_empty() {
+        return vm.ctx.empty_str.to_owned().into();
+    }
     if let [byte] = piece {
         return vm.ctx.latin1_char(*byte).into();
     }
@@ -3279,6 +3287,11 @@ mod tests {
     ///     string's 40-byte GC prefix - if the two are equal the cost belongs to
     ///     the object model, not to strings.
     ///
+    ///     These ns are Windows system-allocator numbers: mimalloc is installed
+    ///     only in the top-level binary (`src/main.rs`), so the per-op cost here
+    ///     is not the cost `bench.py` pays. Read ratios within this table, not
+    ///     against a bench.py case.
+    ///
     ///     cargo test --release -p rustpython-vm --lib -- --nocapture --ignored
     #[test]
     #[ignore = "release-only measurement probe"]
@@ -3301,7 +3314,11 @@ mod tests {
         }
 
         let ctx = Context::genesis();
-        for len in [4usize, 20] {
+        // 22 is `SSO_CAPACITY`, so 4 and 20 both live entirely in the header and
+        // never touch the allocator for their bytes. Crossing it here is what
+        // separates "payload shape" from "a second malloc per string", which the
+        // earlier [4, 20] list could not see at all.
+        for len in [4usize, 20, 22, 23, 40] {
             let bytes = vec![b'a'; len];
             let data = timed(3_000_000, || {
                 drop(StrData::from_known_ascii(black_box(&bytes)));
