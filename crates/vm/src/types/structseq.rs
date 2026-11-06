@@ -3,7 +3,8 @@ use crate::common::wtf8::Wtf8;
 use crate::{
     AsObject, Py, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine, atomic_func,
     builtins::{
-        PyBaseExceptionRef, PyDict, PyStr, PyStrRef, PyTuple, PyTupleRef, PyType, PyTypeRef,
+        PyBaseExceptionRef, PyDict, PyGetSet, PyStr, PyStrInterned, PyStrRef, PyTuple, PyTupleRef,
+        PyType, PyTypeRef,
     },
     class::{PyClassImpl, StaticType},
     function::{Either, FuncArgs, OptionalArg, PyComparisonValue, PyMethodDef, PyMethodFlags},
@@ -14,10 +15,56 @@ use crate::{
     vm::Context,
 };
 
+/// The names of the fields past `n_sequence_fields`, in body order.
+///
+/// CPython reads them from `tp_members[i - n_unnamed_fields]` in
+/// `structseq_reduce`. Our field table is the getset descriptors that
+/// `extend_pyclass` installs: one per named field, in body order, because
+/// `PyAttributes` is an insertion-ordered map. The visible named fields are
+/// getsets too, and they are installed first, and `__match_args__` is exactly
+/// their count - so skipping that many getsets leaves the hidden ones.
+///
+/// Deriving the names here, rather than closing over
+/// `Self::Data::OPTIONAL_FIELD_NAMES`, is forced by the shared method: a
+/// `PyMethodDef`'s `func` is a `&'static dyn PyNativeFn`, so one `const` cannot
+/// hold a different name list per type.
+fn hidden_field_names(class: &Py<PyType>, vm: &VirtualMachine) -> Vec<&'static PyStrInterned> {
+    let visible_named = match class.get_attr(identifier!(vm.ctx, __match_args__)) {
+        Some(match_args) => match_args
+            .downcast_ref::<PyTuple>()
+            .map_or(0, |args| args.len()),
+        None => 0,
+    };
+    class
+        .attributes
+        .read()
+        .iter()
+        .filter(|(_, value)| value.downcast_ref::<PyGetSet>().is_some())
+        .skip(visible_named)
+        .map(|(&name, _)| name)
+        .collect()
+}
+
+/// `__reduce__`, spelled the way CPython's `structseq_reduce` spells it:
+/// `(type, (visible_items, hidden_dict))`.
+///
+/// The two-argument form is what `copy` and `pickle` feed back into the
+/// constructor, and CPython's constructor takes the hidden fields as a dict, so
+/// handing back one args tuple over the whole body only round-trips by accident.
 const DEFAULT_STRUCTSEQ_REDUCE: PyMethodDef = PyMethodDef::new_const(
     "__reduce__",
-    |zelf: PyRef<PyTuple>, vm: &VirtualMachine| -> PyTupleRef {
-        vm.new_tuple((zelf.class().to_owned(), (vm.ctx.new_tuple(zelf.to_vec()),)))
+    |zelf: PyRef<PyTuple>, vm: &VirtualMachine| -> PyResult<PyTupleRef> {
+        let class = zelf.class();
+        let n_seq = get_visible_len(zelf.as_ref(), vm)?;
+        let items = PyTuple::new_ref(zelf.iter().take(n_seq).cloned().collect(), &vm.ctx);
+        let dict = vm.ctx.new_dict();
+        for (name, value) in hidden_field_names(&class, vm)
+            .into_iter()
+            .zip(zelf.iter().skip(n_seq))
+        {
+            dict.set_item(name, value.clone(), vm)?;
+        }
+        Ok(vm.new_tuple((class.to_owned(), vm.new_tuple((items, dict)))))
     },
     PyMethodFlags::METHOD,
     None,
@@ -147,6 +194,14 @@ fn get_visible_len(obj: &PyObject, vm: &VirtualMachine) -> PyResult<usize> {
 /// whoever reads it has to cut it down -- including when a struct sequence is
 /// the *right* operand of `+`, where no slot of its own is consulted.
 pub(crate) fn visible_len_if_structseq(obj: &PyObject, vm: &VirtualMachine) -> Option<usize> {
+    // CPython's rule is `Py_SIZE`, which no user class can imitate, so a plain
+    // tuple subclass that happens to define `n_sequence_fields` must keep every
+    // item visible - believing the attribute alone was a duck-typing mistake.
+    // The iter slot that `extend_pyclass` installs (and that subclasses inherit
+    // with the rest of the slots) is what says the body really is longer.
+    if obj.class().slots.iter.load() != Some(struct_sequence_iter) {
+        return None;
+    }
     obj.class()
         .get_attr(identifier!(vm.ctx, n_sequence_fields))
         .and_then(|value| value.try_into_value(vm).ok())

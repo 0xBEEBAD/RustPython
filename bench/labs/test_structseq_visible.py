@@ -14,10 +14,12 @@ is what makes the expectation evidence rather than a restatement of our code.
     target/release/rustpython.exe bench/labs/test_structseq_visible.py
 """
 
+import copy
 import os
+import pickle
 import sys
-import time
 import socket
+import time
 
 
 def visible(t):
@@ -95,6 +97,41 @@ def probe(seq, label):
     check(f"{label}.reversed", list(reversed(seq)), list(visible(seq))[::-1])
     check(f"{label}.repr.nfields", repr(seq).count("="), n_seq)
     check(f"{label}.bool", bool(seq), True)
+
+    # `__reduce__` is how `copy` and `pickle` rebuild the object, and CPython
+    # spells its answer `(type, (visible_items, hidden_dict))`. The expected
+    # names and values come from `hidden_fields`, which reads the *attributes* -
+    # taking them from `__reduce__` too would make these rows circular.
+    all_hidden = list(hidden_fields(seq))
+    red = seq.__reduce__()
+    check(f"{label}.reduce.len", len(red), 2)
+    check(f"{label}.reduce.type", red[0] is type(seq), True)
+    check(f"{label}.reduce.args.len", len(red[1]), 2)
+    check(f"{label}.reduce.items.exact", type(red[1][0]), tuple)
+    check(f"{label}.reduce.items", red[1][0], visible(seq))
+    check(f"{label}.reduce.dict.exact", type(red[1][1]), dict)
+    check(f"{label}.reduce.dict.keys", list(red[1][1]), [name for name, _ in all_hidden])
+    check(f"{label}.reduce.dict.values", list(red[1][1].values()), [value for _, value in all_hidden])
+    rebuilt = type(seq)(*red[1])
+    check(f"{label}.reduce.roundtrip.eq", rebuilt == seq, True)
+    check(
+        f"{label}.reduce.roundtrip.hidden",
+        [getattr(rebuilt, name, None) for name, _ in all_hidden],
+        [value for _, value in all_hidden],
+    )
+    check(f"{label}.copy.eq", copy.copy(rebuilt) == rebuilt, True)
+    check(
+        f"{label}.copy.hidden",
+        [getattr(copy.copy(rebuilt), name, None) for name, _ in all_hidden],
+        [value for _, value in all_hidden],
+    )
+    unsized = pickle.loads(pickle.dumps(seq))
+    check(f"{label}.pickle.eq", unsized == seq, True)
+    check(
+        f"{label}.pickle.hidden",
+        [getattr(unsized, name, None) for name, _ in all_hidden],
+        [value for _, value in all_hidden],
+    )
 
 
 def hidden_fields(seq):
