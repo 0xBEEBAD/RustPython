@@ -331,6 +331,15 @@ impl GcState {
     /// # Safety
     /// obj must be a valid pointer to a PyObject
     pub unsafe fn track_object(&self, obj: NonNull<PyObject>) {
+        // Measurement-only home for `excgctrack`: the gate used to sit at the
+        // call site in `PyRef::new_ref`, which is hot enough that the branch
+        // alone cost 18 ns on a generator step. Inside here the same ablation
+        // prices the list lock, the intrusive push and the counter - it no
+        // longer prices the `maybe_collect` check the call site also skipped,
+        // so read the number accordingly.
+        if crate::perf_debug::ablated(crate::perf_debug::EXC_GCTRACK) {
+            return;
+        }
         let obj_ref = unsafe { obj.as_ref() };
         obj_ref.set_gc_tracked();
         obj_ref.set_gc_generation(0);
