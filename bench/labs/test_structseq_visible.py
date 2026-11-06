@@ -44,7 +44,15 @@ def probe(seq, label):
     n_seq = seq.n_sequence_fields
     n_all = seq.n_fields
     tail = (100, 101)
-    hidden = hidden_value(seq, n_seq, n_all)
+    hidden = [
+        (name, value)
+        for name, value in hidden_fields(seq)
+        if value not in visible(seq)
+    ]
+    # The sentinel that makes the rows below evidence: if this is not the number
+    # of hidden fields, the probe found no distinguishable hidden value and the
+    # rows would pass for the wrong reason.
+    check(f"{label}.hidden values found", len(hidden), n_all - n_seq)
 
     check(f"{label}.len", len(seq), n_seq)
     check(f"{label}+tuple.len", len(seq + tail), n_seq + len(tail))
@@ -68,32 +76,49 @@ def probe(seq, label):
     check(f"{label}.slice", seq[1:n_seq], visible(seq)[1:])
     check(f"{label}.hash", hash(seq), hash(visible(seq)))
     check(f"{label}.eq", seq == visible(seq), True)
-    check(f"{label}.contains.hidden", hidden is None or hidden not in seq, True)
-    check(f"{label}.contains-method", hidden is None or not seq.__contains__(hidden), True)
-    check(f"{label}.count.hidden", seq.count(hidden), 0)
-    check(f"{label}.index.hidden", raises(lambda: seq.index(hidden), ValueError), True)
+    for name, value in hidden:
+        check(f"{label}.contains[{name}]", value in seq, False)
+        check(f"{label}.contains-method[{name}]", seq.__contains__(value), False)
+        check(f"{label}.count[{name}]", seq.count(value), 0)
+        check(
+            f"{label}.index[{name}]",
+            raises(lambda v=value: seq.index(v), ValueError),
+            True,
+        )
+        check(
+            f"{label}.index.ranged[{name}]",
+            raises(lambda v=value: seq.index(v, 0, n_seq), ValueError),
+            True,
+        )
     check(f"{label}.count.of-visible", seq.count(visible(seq)[-1]), visible(seq).count(visible(seq)[-1]))
     check(f"{label}.index.of-visible", seq.index(visible(seq)[-1]), visible(seq).index(visible(seq)[-1]))
-    check(f"{label}.index.ranged", raises(lambda: seq.index(hidden, 0, n_seq), ValueError), True)
     check(f"{label}.reversed", list(reversed(seq)), list(visible(seq))[::-1])
     check(f"{label}.repr.nfields", repr(seq).count("="), n_seq)
     check(f"{label}.bool", bool(seq), True)
 
 
-def hidden_value(seq, n_seq, n_all):
-    """A value that sits in the body past `n_sequence_fields`, or None.
+def hidden_fields(seq):
+    """The (name, value) pairs a struct sequence keeps past `n_sequence_fields`.
 
-    `__reduce__` is the one place CPython itself admits the real size, so it is
-    how this probe reaches a field every other operation must hide.
+    Read through the attributes, not `__reduce__`: this probe partly exists to
+    pin what `__reduce__` returns, so it must not also take its test data from
+    there - that would make the row circular, and it was exactly how an earlier
+    revision of this file passed 60/60 while witnessing nothing.
     """
-    try:
-        items = seq.__reduce__()[1]
-    except Exception:
-        return None
-    for i in range(n_seq, n_all):
-        if isinstance(items, (tuple, list)) and len(items) > i:
-            return items[i]
-    return None
+    skip = set(seq.__match_args__) | {
+        "n_sequence_fields",
+        "n_fields",
+        "n_unnamed_fields",
+    }
+    out = []
+    for name in vars(type(seq)):
+        if name.startswith("_") or name in skip:
+            continue
+        try:
+            out.append((name, getattr(seq, name)))
+        except AttributeError:
+            continue
+    return out
 
 
 def raises(fn, exc):
