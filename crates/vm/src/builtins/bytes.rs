@@ -13,6 +13,7 @@ use crate::{
         ByteInnerSplitOptions, ByteInnerTranslateOptions, DecodeArgs, PyBytesInner, bytes_decode,
     },
     class::PyClassImpl,
+    codecs::{BytesEncoding, BytesErrors},
     common::{hash::PyHash, lock::PyMutex},
     convert::{ToPyObject, ToPyResult},
     function::{
@@ -96,7 +97,7 @@ impl Constructor for PyBytes {
     type Args = Vec<u8>;
 
     fn slot_new(cls: PyTypeRef, args: FuncArgs, vm: &VirtualMachine) -> PyResult {
-        let options: ByteInnerNewOptions = args.bind(vm)?;
+        let options: ByteInnerNewOptions<BytesEncoding, BytesErrors> = args.bind(vm)?;
 
         // Optimizations for exact bytes type
         if cls.is(vm.ctx.types.bytes_type) {

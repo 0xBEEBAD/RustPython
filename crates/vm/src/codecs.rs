@@ -31,7 +31,7 @@ use crate::{
 /// (Python/getargs.c), which formats
 /// `"{fn}() argument '{param}' must be str, not {type}"` and spells `None` as
 /// `None` rather than by its type's name, so a rejection has to know both.
-pub(crate) trait CodecParam: 'static {
+pub trait CodecParam: 'static {
     const FN: &'static str;
     const PARAM: &'static str;
 }
@@ -46,28 +46,93 @@ pub(crate) enum CodecArg<T: CodecParam> {
     Given(PyUtf8StrRef, PhantomData<T>),
 }
 
-pub(crate) struct EncodeEncoding;
+/// A `pub` marker only because a `pub` constructor struct names it as a type
+/// argument; the `codecs` module itself stays private to the crate.
+pub struct EncodeEncoding;
 impl CodecParam for EncodeEncoding {
     const FN: &'static str = "encode";
     const PARAM: &'static str = "encoding";
 }
 
-pub(crate) struct EncodeErrors;
+pub struct EncodeErrors;
 impl CodecParam for EncodeErrors {
     const FN: &'static str = "encode";
     const PARAM: &'static str = "errors";
 }
 
-pub(crate) struct DecodeEncoding;
+pub struct DecodeEncoding;
 impl CodecParam for DecodeEncoding {
     const FN: &'static str = "decode";
     const PARAM: &'static str = "encoding";
 }
 
-pub(crate) struct DecodeErrors;
+pub struct DecodeErrors;
 impl CodecParam for DecodeErrors {
     const FN: &'static str = "decode";
     const PARAM: &'static str = "errors";
+}
+
+/// The constructors take the same two `str` parameters, named after
+/// themselves rather than after the method (`bytes() argument 'encoding'`).
+pub struct BytesEncoding;
+impl CodecParam for BytesEncoding {
+    const FN: &'static str = "bytes";
+    const PARAM: &'static str = "encoding";
+}
+
+pub struct BytesErrors;
+impl CodecParam for BytesErrors {
+    const FN: &'static str = "bytes";
+    const PARAM: &'static str = "errors";
+}
+
+pub struct ByteArrayEncoding;
+impl CodecParam for ByteArrayEncoding {
+    const FN: &'static str = "bytearray";
+    const PARAM: &'static str = "encoding";
+}
+
+pub struct ByteArrayErrors;
+impl CodecParam for ByteArrayErrors {
+    const FN: &'static str = "bytearray";
+    const PARAM: &'static str = "errors";
+}
+
+pub struct StrEncoding;
+impl CodecParam for StrEncoding {
+    const FN: &'static str = "str";
+    const PARAM: &'static str = "encoding";
+}
+
+pub struct StrErrors;
+impl CodecParam for StrErrors {
+    const FN: &'static str = "str";
+    const PARAM: &'static str = "errors";
+}
+
+/// The rejection every clinic `str` parameter produces, in one place.
+///
+/// `none_as_type` is set only for `str()`'s all-positional calls: those are
+/// answered by CPython's `unicode_vectorcall`, which validates with
+/// `arg_as_utf8()` and names the offender with `%T`, so a `None` reads
+/// `NoneType` there while every other site -- including `str()` with a keyword
+/// -- goes through `_PyArg_BadArgument` and says `None`
+/// (`Objects/unicodeobject.c:13920` against `Python/getargs.c:669`).
+pub(crate) fn codec_arg_reject<T: CodecParam>(
+    obj: &PyObject,
+    none_as_type: bool,
+    vm: &VirtualMachine,
+) -> PyBaseExceptionRef {
+    let shown = if obj.class().is(vm.ctx.types.none_type) && !none_as_type {
+        "None".to_owned()
+    } else {
+        obj.class().name().to_owned()
+    };
+    vm.new_type_error(format!(
+        "{}() argument '{}' must be str, not {shown}",
+        T::FN,
+        T::PARAM
+    ))
 }
 
 impl<T: CodecParam> CodecArg<T> {
@@ -78,26 +143,37 @@ impl<T: CodecParam> CodecArg<T> {
             Self::Given(value, _) => Some(value),
         }
     }
+
+    /// Whether the caller left the parameter out altogether, which is not the
+    /// same call as passing `None`.
+    pub(crate) fn is_missing(&self) -> bool {
+        matches!(self, Self::Absent)
+    }
 }
 
 impl<'a, T: CodecParam> TryFromBorrowedObject<'a> for CodecArg<T> {
     fn try_from_borrowed_object(vm: &VirtualMachine, obj: &'a PyObject) -> PyResult<Self> {
         match PyUtf8StrRef::try_from_object(vm, obj.to_owned()) {
             Ok(value) => Ok(Self::Given(value, PhantomData)),
-            Err(_) => {
-                let shown = if obj.class().is(vm.ctx.types.none_type) {
-                    "None".to_owned()
-                } else {
-                    obj.class().name().to_owned()
-                };
-                Err(vm.new_type_error(format!(
-                    "{}() argument '{}' must be str, not {shown}",
-                    T::FN,
-                    T::PARAM
-                )))
-            }
+            Err(_) => Err(codec_arg_reject::<T>(obj, false, vm)),
         }
     }
+}
+
+/// Check one positionally-given codec parameter the way CPython's
+/// `unicode_vectorcall` does, before its clinic fallback would.
+pub(crate) fn check_positional_codec_arg<T: CodecParam>(
+    args: &[PyObjectRef],
+    index: usize,
+    vm: &VirtualMachine,
+) -> PyResult<()> {
+    let Some(obj) = args.get(index) else {
+        return Ok(());
+    };
+    if PyUtf8StrRef::try_from_object(vm, obj.to_owned()).is_ok() {
+        return Ok(());
+    }
+    Err(codec_arg_reject::<T>(obj, true, vm))
 }
 
 pub struct CodecsRegistry {

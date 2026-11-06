@@ -7,8 +7,8 @@ use crate::{
         pystr, pystr::PyUtf8StrRef,
     },
     byte::bytes_from_object,
-    codecs::{CodecArg, DecodeEncoding, DecodeErrors},
     cformat::cformat_bytes,
+    codecs::{CodecArg, CodecParam, DecodeEncoding, DecodeErrors},
     common::hash,
     common::wtf8::is_py_ascii_whitespace,
     function::{Either, OptionalArg, OptionalOption, PyComparisonValue},
@@ -43,23 +43,23 @@ impl<'a> TryFromBorrowedObject<'a> for PyBytesInner {
 }
 
 #[derive(FromArgs)]
-pub struct ByteInnerNewOptions {
+pub struct ByteInnerNewOptions<E: CodecParam, R: CodecParam> {
     #[pyarg(any, optional)]
-    pub source: OptionalArg<PyObjectRef>,
-    #[pyarg(any, optional)]
-    pub encoding: OptionalArg<PyUtf8StrRef>,
-    #[pyarg(any, optional)]
-    pub errors: OptionalArg<PyUtf8StrRef>,
+    pub(crate) source: OptionalArg<PyObjectRef>,
+    #[pyarg(any, default = CodecArg::Absent)]
+    pub(crate) encoding: CodecArg<E>,
+    #[pyarg(any, default = CodecArg::Absent)]
+    pub(crate) errors: CodecArg<R>,
 }
 
-impl ByteInnerNewOptions {
+impl<E: CodecParam, R: CodecParam> ByteInnerNewOptions<E, R> {
     fn get_value_from_string(
         s: PyStrRef,
         encoding: PyUtf8StrRef,
-        errors: OptionalArg<PyUtf8StrRef>,
+        errors: Option<PyUtf8StrRef>,
         vm: &VirtualMachine,
     ) -> PyResult<PyBytesInner> {
-        let bytes = pystr::encode_string(s, Some(encoding), errors.into_option(), vm)?;
+        let bytes = pystr::encode_string(s, Some(encoding), errors, vm)?;
         Ok(bytes.as_bytes().to_vec().into())
     }
 
@@ -93,8 +93,10 @@ impl ByteInnerNewOptions {
     }
 
     pub fn get_bytearray_inner(self, vm: &VirtualMachine) -> PyResult<PyBytesInner> {
-        match (self.source, self.encoding, self.errors) {
-            (OptionalArg::Present(obj), OptionalArg::Missing, OptionalArg::Missing) => {
+        let encoding = self.encoding.into_option();
+        let errors = self.errors.into_option();
+        match (self.source, encoding, errors) {
+            (OptionalArg::Present(obj), None, None) => {
                 // Try __index__ first to handle int-like objects that might raise custom exceptions
                 if let Some(index_result) = obj.try_index_opt(vm) {
                     match index_result {
@@ -115,23 +117,21 @@ impl ByteInnerNewOptions {
                     Self::handle_object_fallback(obj, vm)
                 }
             }
-            (OptionalArg::Present(obj), OptionalArg::Present(encoding), errors) => {
+            (OptionalArg::Present(obj), Some(encoding), errors) => {
                 if let Ok(s) = obj.downcast::<PyStr>() {
                     Self::get_value_from_string(s, encoding, errors, vm)
                 } else {
                     Err(vm.new_type_error(ENCODING_WITHOUT_STRING.to_owned()))
                 }
             }
-            (OptionalArg::Missing, OptionalArg::Missing, OptionalArg::Missing) => {
-                Ok(PyBytesInner::default())
-            }
-            (OptionalArg::Missing, OptionalArg::Present(_), _) => {
+            (OptionalArg::Missing, None, None) => Ok(PyBytesInner::default()),
+            (OptionalArg::Missing, Some(_), _) => {
                 Err(vm.new_type_error(ENCODING_WITHOUT_STRING.to_owned()))
             }
-            (OptionalArg::Missing, _, OptionalArg::Present(_)) => {
+            (OptionalArg::Missing, _, Some(_)) => {
                 Err(vm.new_type_error("errors without a string argument"))
             }
-            (OptionalArg::Present(_), OptionalArg::Missing, OptionalArg::Present(_)) => {
+            (OptionalArg::Present(_), None, Some(_)) => {
                 Err(vm.new_type_error(STRING_WITHOUT_ENCODING.to_owned()))
             }
         }

@@ -12,7 +12,9 @@ use crate::{
     anystr::{self, AnyStr, AnyStrContainer, AnyStrWrapper, StringRange, adjust_indices},
     atomic_func,
     bytes_inner::{swapcase_ascii, title_ascii},
-    codecs::{CodecArg, EncodeEncoding, EncodeErrors},
+    codecs::{
+        CodecArg, EncodeEncoding, EncodeErrors, StrEncoding, StrErrors, check_positional_codec_arg,
+    },
     cformat::cformat_string,
     class::PyClassImpl,
     common::{
@@ -492,10 +494,10 @@ impl IterNext for PyStrIterator {
 pub struct StrArgs {
     #[pyarg(any, optional)]
     object: OptionalArg<PyObjectRef>,
-    #[pyarg(any, optional)]
-    encoding: OptionalArg<PyUtf8StrRef>,
-    #[pyarg(any, optional)]
-    errors: OptionalArg<PyUtf8StrRef>,
+    #[pyarg(any, default = CodecArg::Absent)]
+    encoding: CodecArg<StrEncoding>,
+    #[pyarg(any, default = CodecArg::Absent)]
+    errors: CodecArg<StrErrors>,
 }
 
 impl Constructor for PyStr {
@@ -509,6 +511,15 @@ impl Constructor for PyStr {
             && func_args.args[0].class().is(vm.ctx.types.str_type)
         {
             return Ok(func_args.args[0].clone());
+        }
+
+        // CPython answers an all-positional `str()` from `unicode_vectorcall`,
+        // which checks the two codec parameters itself with `arg_as_utf8()` and
+        // blames them by type; only a call that uses a keyword falls back to the
+        // clinic parser, which spells the same `None` as `None`.
+        if func_args.kwargs.is_empty() {
+            check_positional_codec_arg::<StrEncoding>(&func_args.args, 1, vm)?;
+            check_positional_codec_arg::<StrErrors>(&func_args.args, 2, vm)?;
         }
 
         let args: Self::Args = func_args.bind(vm)?;

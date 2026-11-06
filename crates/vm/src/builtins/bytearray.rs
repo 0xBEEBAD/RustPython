@@ -14,6 +14,7 @@ use crate::{
         ByteInnerSplitOptions, ByteInnerTranslateOptions, DecodeArgs, PyBytesInner, bytes_decode,
     },
     class::PyClassImpl,
+    codecs::{ByteArrayEncoding, ByteArrayErrors},
     common::{
         atomic::{AtomicUsize, Ordering},
         lock::{
@@ -779,7 +780,7 @@ impl PyRef<PyByteArray> {
 impl DefaultConstructor for PyByteArray {}
 
 impl Initializer for PyByteArray {
-    type Args = ByteInnerNewOptions;
+    type Args = ByteInnerNewOptions<ByteArrayEncoding, ByteArrayErrors>;
 
     fn init(zelf: PyRef<Self>, options: Self::Args, vm: &VirtualMachine) -> PyResult<()> {
         // First unpack bytearray and *then* get a lock to set it.
