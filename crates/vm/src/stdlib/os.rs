@@ -1244,14 +1244,25 @@ pub(super) mod _os {
         #[pyarg(any, default)]
         #[pystruct_sequence(skip)]
         pub st_blocks: u64,
+        // Windows-only attributes, in the body order CPython's
+        // `stat_result_fields` table gives them (Modules/posixmodule.c):
+        // birthtime, birthtime_ns, file_attributes, reparse_tag at 16..19.
         #[cfg(windows)]
         #[pyarg(any, default)]
         #[pystruct_sequence(skip)]
-        pub st_reparse_tag: u32,
+        pub st_birthtime: f64,
+        #[cfg(windows)]
+        #[pyarg(any, default)]
+        #[pystruct_sequence(skip)]
+        pub st_birthtime_ns: i128,
         #[cfg(windows)]
         #[pyarg(any, default)]
         #[pystruct_sequence(skip)]
         pub st_file_attributes: u32,
+        #[cfg(windows)]
+        #[pyarg(any, default)]
+        #[pystruct_sequence(skip)]
+        pub st_reparse_tag: u32,
     }
 
     impl StatResultData {
@@ -1275,9 +1286,11 @@ pub(super) mod _os {
             let to_ns = |(s, ns)| s as i128 * NANOS_PER_SEC as i128 + ns as i128;
 
             #[cfg(windows)]
-            let st_reparse_tag = stat.st_reparse_tag;
+            let birthtime = (stat.st_birthtime, stat.st_birthtime_nsec);
             #[cfg(windows)]
             let st_file_attributes = stat.st_file_attributes;
+            #[cfg(windows)]
+            let st_reparse_tag = stat.st_reparse_tag;
 
             // On Windows, combine st_ino and st_ino_high into a 128-bit value
             // like _pystat_l128_from_l64_l64
@@ -1322,9 +1335,13 @@ pub(super) mod _os {
                 #[cfg(not(windows))]
                 st_blocks,
                 #[cfg(windows)]
-                st_reparse_tag,
+                st_birthtime: to_f64(birthtime),
+                #[cfg(windows)]
+                st_birthtime_ns: to_ns(birthtime),
                 #[cfg(windows)]
                 st_file_attributes,
+                #[cfg(windows)]
+                st_reparse_tag,
             }
         }
     }
