@@ -510,6 +510,15 @@ impl Context {
     #[inline]
     pub fn new_str(&self, s: impl Into<pystr::PyStr>) -> PyRef<PyStr> {
         let s = s.into();
+        // CPython's `PyUnicode_New` answers a length of zero from the empty
+        // singleton (Objects/unicodeobject.c), so no code path there can make a
+        // second empty string and `x is ''` holds for every empty result. The
+        // `inline_bytes` test is not decoration: `capi`'s `PyUnicode_New` hands
+        // us a non-compact `StrStorage::Inline`, which extensions read at the
+        // compact offset, and the interned empty string is not that layout.
+        if s.is_empty() && s.data().inline_bytes().is_none() {
+            return self.empty_str.to_owned();
+        }
         if let Some(ch) = Self::latin1_singleton_index(&s) {
             return self.latin1_char(ch);
         }

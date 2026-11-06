@@ -548,6 +548,16 @@ impl Constructor for PyStr {
         }
 
         let payload = Self::py_new(&cls, args, vm)?;
+        // `str()` with no argument, and `str(b"")`, land here as a fresh empty
+        // payload that `into_ref_with_type` would materialize as a husk; the
+        // other choke points cannot see this path because it constructs through
+        // the type rather than through `Context::new_str`.
+        if payload.is_empty()
+            && payload.data().inline_bytes().is_none()
+            && cls.is(vm.ctx.types.str_type)
+        {
+            return Ok(vm.ctx.empty_str.to_owned().into());
+        }
         payload.into_ref_with_type(vm, cls).map(Into::into)
     }
 
@@ -1503,6 +1513,12 @@ impl PyStr {
                 stack[pos..pos + b.len()].copy_from_slice(b);
                 pos += b.len();
             }
+            if pos == 0 {
+                // This branch calls `into_ref` directly, so it is the one join
+                // shape that would otherwise miss the empty singleton CPython
+                // answers with for `"".join(["", ""])`.
+                return Some(vm.ctx.empty_str.to_owned());
+            }
             if let Some(data) = StrData::try_sso(&stack[..pos]) {
                 return Some(PyStr::from(data).into_ref(&vm.ctx));
             }
@@ -2262,6 +2278,22 @@ impl PyPayload for PyStr {
     const MAX_FREELIST: usize = 100;
     const HAS_FREELIST: bool = true;
     const SLIM_HEADER: bool = true;
+
+    /// The methods that hand back a `PyStr` value rather than a `PyObjectRef`
+    /// (`upper`, `lower`, `casefold`, the strip family, `__add__`, `partition`'s
+    /// pieces and every zero-length slice) land here, and a zero-length one is
+    /// the interned empty string - the guarantee CPython gets from
+    /// `PyUnicode_New(0)` answering from `_PyUnicode_GetEmpty()`. `Context::new_str`
+    /// does the same for the paths that go through it; `StrStorage::Inline` is
+    /// excluded because the C-API reads that non-compact layout at an offset the
+    /// interned object does not have.
+    #[inline]
+    fn into_pyobject(self, vm: &VirtualMachine) -> PyObjectRef {
+        if self.is_empty() && self.data().inline_bytes().is_none() {
+            return vm.ctx.empty_str.to_owned().into();
+        }
+        self.into_ref(&vm.ctx).into()
+    }
 
     #[inline]
     fn class(ctx: &Context) -> &'static Py<PyType> {
@@ -3318,7 +3350,7 @@ mod tests {
         // never touch the allocator for their bytes. Crossing it here is what
         // separates "payload shape" from "a second malloc per string", which the
         // earlier [4, 20] list could not see at all.
-        for len in [4usize, 20, 22, 23, 40] {
+        for len in [4usize, 20, 22, 23, 32, 48, 64, 128] {
             let bytes = vec![b'a'; len];
             let data = timed(3_000_000, || {
                 drop(StrData::from_known_ascii(black_box(&bytes)));
@@ -3332,6 +3364,14 @@ mod tests {
                 let obj: PyRef<PyStr> =
                     PyStr::from(StrData::from_known_ascii(black_box(&bytes))).into_ref(&**ctx);
                 std::mem::forget(obj);
+            });
+            // The reference row: one `Vec` allocation and free of the same
+            // bytes, with no string code involved at all. If this tracks the
+            // StrData row, the cost past SSO capacity is the allocator's and
+            // only a compact (header-tail) storage would fix it; if it does
+            // not, our construction is doing something extra per byte.
+            let vec_only = timed(3_000_000, || {
+                drop(Vec::from(black_box(&bytes)));
             });
             let int = timed(2_000_000, || {
                 let num: PyRef<PyInt> = ctx.new_int(black_box(len as i32));
@@ -3347,9 +3387,9 @@ mod tests {
                 black_box(&num);
             });
             println!(
-                "len={len:2}: StrData {data:5.1} ns | str create+drop {object:5.1} ns | \
-                 str create only {created_only:5.1} ns | int cached {int:5.1} ns | \
-                 int cold {cold_int:5.1} ns | sizes str={} data={} int={}",
+                "len={len:3}: StrData {data:5.1} ns | vec alloc+free {vec_only:5.1} ns | \
+                 str create+drop {object:5.1} ns | str create only {created_only:5.1} ns | \
+                 int cached {int:5.1} ns | int cold {cold_int:5.1} ns | sizes str={} data={} int={}",
                 std::mem::size_of::<PyStr>(),
                 std::mem::size_of::<StrData>(),
                 std::mem::size_of::<PyInt>(),
