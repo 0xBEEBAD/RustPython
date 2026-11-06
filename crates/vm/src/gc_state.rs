@@ -345,6 +345,11 @@ impl GcState {
         obj_ref.set_gc_generation(0);
 
         let mut list = self.generation_lists[0].write();
+        if crate::perf_debug::ablated(crate::perf_debug::EXC_GCQUEUE) {
+            let count = self.generations[0].count.load(Ordering::Relaxed);
+            self.generations[0].count.store(count + 1, Ordering::Relaxed);
+            return;
+        }
         list.push_front(obj);
         // Every writer of the gen0 allocation counter holds that list's write
         // lock (track, gen0 untrack, collection reset), so a relaxed load+store
@@ -381,6 +386,20 @@ impl GcState {
             if obj_ref.gc_generation() != obj_gen {
                 drop(list);
                 continue; // Retry with the updated generation
+            }
+            if crate::perf_debug::ablated(crate::perf_debug::EXC_GCQUEUE) {
+                // Paired with the skip in `track_object`: nothing was ever
+                // pushed, so there is nothing to remove, and only the
+                // bookkeeping the real path would have done is left.
+                if obj_gen == 0 {
+                    let count = self.generations[0].count.load(Ordering::Relaxed);
+                    if count > 0 {
+                        self.generations[0].count.store(count - 1, Ordering::Relaxed);
+                    }
+                }
+                obj_ref.clear_gc_tracked();
+                obj_ref.set_gc_generation(GC_UNTRACKED);
+                return;
             }
             if unsafe { list.remove(obj) }.is_some() {
                 // Rule D: deallocation decrements the generation-0 allocation

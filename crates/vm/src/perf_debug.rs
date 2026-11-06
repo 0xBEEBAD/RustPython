@@ -222,6 +222,13 @@ pub(crate) const EXC_GCTRACK: u64 = 281474976710656;
 /// the slots. Never enable while running real code: `f_locals` of a dead frame
 /// then shows what the materialization copied, not what the frame held.
 pub(crate) const EXC_SYNCFLOT: u64 = 562949953421312;
+/// Measurement only: keep the generation-list lock and the bookkeeping but
+/// skip the intrusive list write - `track_object` does not push and
+/// `untrack_object` does not remove, so the lists stay empty and nothing can
+/// dangle. Read it against `EXC_GCTRACK`: the gap between the two is the cost
+/// of touching the list nodes, the remainder is the lock. Never enable while
+/// running real code: the collector then sees nothing to collect.
+pub(crate) const EXC_GCQUEUE: u64 = 1125899906842624;
 /// Measurement only: answer `None` from the specialized no-argument
 /// method-descriptor call without running the callee, which prices the dispatch
 /// arm itself - guards, argument vector, call context, stack moves - against the
@@ -418,6 +425,7 @@ pub(crate) fn ablated(bit: u64) -> bool {
                     "excold" => EXC_FOCOLD,
                     "excgctrack" => EXC_GCTRACK,
                     "excsyncflot" => EXC_SYNCFLOT,
+                    "excgcqueue" => EXC_GCQUEUE,
                     "mdstub" => MD_STUB,
                     "mdctx" => MD_CTX,
                     "mdarm" => MD_ARM,
