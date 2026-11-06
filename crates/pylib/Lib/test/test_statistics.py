@@ -1872,6 +1872,7 @@ class TestMultiMode(unittest.TestCase):
 
 class TestFMean(unittest.TestCase):
 
+    @unittest.expectedFailure  # TODO: RUSTPYTHON; itertools.compress consumes one selector too many when data is exhausted (crates/itertools), so statistics._sum's iterator path computes n = next(counter) - 1 one too high
     def test_basics(self):
         fmean = statistics.fmean
         D = Decimal
@@ -1889,6 +1890,7 @@ class TestFMean(unittest.TestCase):
             self.assertIs(type(actual_mean), float, kind)
             self.assertEqual(actual_mean, expected_mean, kind)
 
+    @unittest.expectedFailure  # TODO: RUSTPYTHON; fmean(iter([])) should raise StatisticsError, but statistics._sum computes n as 1 for an empty iterator because itertools.compress pulls a selector before pulling data (crates/itertools)
     def test_error_cases(self):
         fmean = statistics.fmean
         StatisticsError = statistics.StatisticsError
@@ -2496,8 +2498,7 @@ class TestKDE(unittest.TestCase):
 
         data = [-2.1, -1.3, -0.4, 1.9, 5.1, 6.2, 7.8, 14.3, 15.1, 15.3, 15.8, 17.0]
         xarr = [x / 10 for x in range(-100, 250)]
-        # TODO: RUSTPYTHON - n originally 1_000_000 in CPython implementation but sorting is slow
-        n = 30_000
+        n = 1_000_000
         h = 1.75
         dx = 0.1
 
@@ -2519,8 +2520,7 @@ class TestKDE(unittest.TestCase):
                 F_hat = statistics.kde(data, h, kernel, cumulative=True)
 
                 for x in xarr:
-                    # TODO : RUSTPYTHON - abs_tol=0.0005 in CPython implementation but smaller `n` increases variance
-                    self.assertTrue(math.isclose(p_observed(x), p_expected(x), abs_tol=0.005))
+                    self.assertTrue(math.isclose(p_observed(x), p_expected(x), abs_tol=0.0005))
 
         # Test online updates to data
 
