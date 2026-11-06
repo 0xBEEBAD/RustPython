@@ -194,6 +194,13 @@ pub(crate) const EXC_ARGS: u64 = 536870912;
 /// be cleared on the way out. Never enable while running real code: tracebacks
 /// and `sys.exc_info()` line numbers depend on it.
 pub(crate) const EXC_TB: u64 = 1073741824;
+/// Measurement only: hand the materialized frame an EMPTY heap localsplus, the
+/// same shape `materialize_slow_chain` already builds, which prices the
+/// `snapshot_to_heap` pass the raise path pays even though `exit_iframe`
+/// re-copies the slots through `sync_from_live` on the way out anyway.
+/// Never enable while running real code: `f_locals`, show-locals and
+/// re-raising read that snapshot.
+pub(crate) const EXC_TBSNAP: u64 = 35184372088832;
 /// Measurement only: answer `None` from the specialized no-argument
 /// method-descriptor call without running the callee, which prices the dispatch
 /// arm itself - guards, argument vector, call context, stack moves - against the
@@ -385,6 +392,7 @@ pub(crate) fn ablated(bit: u64) -> bool {
                     "excunwindtail" => EXC_UNWINDTAIL,
                     "excargs" => EXC_ARGS,
                     "exctb" => EXC_TB,
+                    "exctbsnap" => EXC_TBSNAP,
                     "mdstub" => MD_STUB,
                     "mdctx" => MD_CTX,
                     "mdarm" => MD_ARM,

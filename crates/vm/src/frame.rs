@@ -1158,7 +1158,19 @@ impl InterpreterFrame {
 
         // Copy localsplus from the stack frame so materialized frames have
         // usable fastlocals (for locals(), f_locals, tracebacks, etc).
-        let localsplus = unsafe { self.localsplus.snapshot_to_heap() };
+        // `exctbsnap` builds the empty form instead - the same shape
+        // `materialize_slow_chain` uses - to price this copy against the
+        // `sync_from_live` pass that `exit_iframe` performs anyway.
+        let localsplus = if crate::perf_debug::ablated(crate::perf_debug::EXC_TBSNAP) {
+            let nlocalsplus = code.localspluskinds.len() as u32;
+            LocalsPlus {
+                data: LocalsPlusData::Heap(vec![0usize; nlocalsplus as usize].into_boxed_slice()),
+                nlocalsplus,
+                stack_top: 0,
+            }
+        } else {
+            unsafe { self.localsplus.snapshot_to_heap() }
+        };
 
         // Copy the locals mapping if it exists.
         let locals = match self.locals.get() {
