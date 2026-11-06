@@ -129,6 +129,18 @@ impl Coro {
     /// What the resume depends on -- whether the generator is closed, and
     /// whether it has started -- has to be read from here onwards.
     fn claim(&self, jen: &PyObject, vm: &VirtualMachine) -> PyResult<RunningGuard<'_>> {
+        // The claim exists to answer a second thread, and with no other thread
+        // the same answer is two plain accesses instead of a locked
+        // compare-and-exchange on every resume. `thread_count == 0` is the
+        // idiom the interpreter already uses for its single-thread fast paths
+        // (crates/vm/src/frame.rs:5904, builtins/range.rs:713).
+        if vm.state.thread_count.load() == 0 {
+            if self.running.load() {
+                return Err(vm.new_value_error(format!("{} already executing", gen_name(jen, vm))));
+            }
+            self.running.store(true);
+            return Ok(RunningGuard(self));
+        }
         if self.running.compare_exchange(false, true).is_err() {
             return Err(vm.new_value_error(format!("{} already executing", gen_name(jen, vm))));
         }
