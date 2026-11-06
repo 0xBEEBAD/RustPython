@@ -1200,10 +1200,14 @@ impl InterpreterFrame {
             owner: atomic::AtomicI8::new(FrameOwner::FrameObject as i8),
             datastack_base: core::ptr::null_mut(),
             materialized: Radium::new(0),
-            cold: OnceCell::from(Box::new(FrameColdData {
-                escaped: atomic::AtomicBool::new(true),
-                ..FrameColdData::default()
-            })),
+            cold: if crate::perf_debug::ablated(crate::perf_debug::EXC_FOCOLD) {
+                OnceCell::new()
+            } else {
+                OnceCell::from(Box::new(FrameColdData {
+                    escaped: atomic::AtomicBool::new(true),
+                    ..FrameColdData::default()
+                }))
+            },
         };
 
         let frame_obj = FrameObject {
@@ -1280,10 +1284,14 @@ impl InterpreterFrame {
             owner: atomic::AtomicI8::new(FrameOwner::FrameObject as i8),
             datastack_base: core::ptr::null_mut(),
             materialized: Radium::new(0),
-            cold: OnceCell::from(Box::new(FrameColdData {
-                escaped: atomic::AtomicBool::new(true),
-                ..FrameColdData::default()
-            })),
+            cold: if crate::perf_debug::ablated(crate::perf_debug::EXC_FOCOLD) {
+                OnceCell::new()
+            } else {
+                OnceCell::from(Box::new(FrameColdData {
+                    escaped: atomic::AtomicBool::new(true),
+                    ..FrameColdData::default()
+                }))
+            },
         };
 
         let frame_obj = FrameObject {
@@ -1424,7 +1432,9 @@ impl FrameObject {
         #[allow(unused_imports)]
         use rustpython_common::atomic::Radium;
         let snap = unsafe { self.iframe_mut() };
-        unsafe { snap.localsplus.sync_fastlocals_from(&live.localsplus) };
+        if !crate::perf_debug::ablated(crate::perf_debug::EXC_SYNCFLOT) {
+            unsafe { snap.localsplus.sync_fastlocals_from(&live.localsplus) };
+        }
         snap.prev_line.set(live.prev_line.get());
         snap.lasti.store(
             live.lasti.load(core::sync::atomic::Ordering::Relaxed),

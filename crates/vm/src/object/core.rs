@@ -2824,6 +2824,7 @@ impl<T: PyPayload + crate::object::MaybeTraverse + core::fmt::Debug> PyRef<T> {
         // which are tracked lazily only on escape).
         if (<T as crate::object::MaybeTraverse>::HAS_TRAVERSE || has_dict || is_heaptype)
             && !T::NEW_REF_UNTRACKED
+            && !crate::perf_debug::ablated(crate::perf_debug::EXC_GCTRACK)
         {
             let gc = crate::gc_state::gc_state();
             unsafe {

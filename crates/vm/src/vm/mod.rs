@@ -2495,8 +2495,9 @@ impl VirtualMachine {
                 }
             };
             if mat_ptr != 0 || handed_out.is_some() {
-                let back_fo =
-                    (!old_chain.is_null()).then(|| unsafe { &*old_chain }.materialize_chain(self));
+                let back_fo = (!old_chain.is_null()
+                    && !crate::perf_debug::ablated(crate::perf_debug::EXC_CHAIN))
+                    .then(|| unsafe { &*old_chain }.materialize_chain(self));
                 if mat_ptr != 0 {
                     let fo = unsafe {
                         &*(mat_ptr as *const crate::Py<crate::frame::FrameObject>)

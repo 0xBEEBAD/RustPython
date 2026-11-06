@@ -201,6 +201,27 @@ pub(crate) const EXC_TB: u64 = 1073741824;
 /// Never enable while running real code: `f_locals`, show-locals and
 /// re-raising read that snapshot.
 pub(crate) const EXC_TBSNAP: u64 = 35184372088832;
+/// Measurement only: do not materialize the chain `FrameObject` when an
+/// unwinding frame hands its chain to the frame object that survives it, which
+/// prices a whole second frame object (its allocation, its four reference
+/// clones, its cold data and its teardown) per raise. Never enable while
+/// running real code: `f_back` through a traceback reads exactly that object.
+pub(crate) const EXC_CHAIN: u64 = 70368744177664;
+/// Measurement only: start the materialized frame with an empty `cold` slot
+/// instead of boxing cold data up front, which prices one ~180-byte allocation
+/// and its nine-lock default-initialization. Read it together with `EXC_CHAIN`:
+/// on its own the lazy `cold()` just allocates the same box later.
+pub(crate) const EXC_FOCOLD: u64 = 140737488355328;
+/// Measurement only: leave frame objects and traceback entries out of the
+/// cyclic-GC set, which prices the write lock, the list push and the
+/// collection check per object. Never enable while running real code: a cycle
+/// through one of them is then leaked.
+pub(crate) const EXC_GCTRACK: u64 = 281474976710656;
+/// Measurement only: skip the fastlocals copy that hands the live frame's
+/// slots to the snapshot on the way out, which prices that second pass over
+/// the slots. Never enable while running real code: `f_locals` of a dead frame
+/// then shows what the materialization copied, not what the frame held.
+pub(crate) const EXC_SYNCFLOT: u64 = 562949953421312;
 /// Measurement only: answer `None` from the specialized no-argument
 /// method-descriptor call without running the callee, which prices the dispatch
 /// arm itself - guards, argument vector, call context, stack moves - against the
@@ -393,6 +414,10 @@ pub(crate) fn ablated(bit: u64) -> bool {
                     "excargs" => EXC_ARGS,
                     "exctb" => EXC_TB,
                     "exctbsnap" => EXC_TBSNAP,
+                    "excchain" => EXC_CHAIN,
+                    "excold" => EXC_FOCOLD,
+                    "excgctrack" => EXC_GCTRACK,
+                    "excsyncflot" => EXC_SYNCFLOT,
                     "mdstub" => MD_STUB,
                     "mdctx" => MD_CTX,
                     "mdarm" => MD_ARM,
