@@ -91,6 +91,17 @@ class ServerContextvarsTestCase:
 
     def test_start_server3(self):
         # Test that mutations to context in concurrent handlers don't affect each other or the server's context
+        # TODO: RUSTPYTHON; this opens 100 sockets, and our Windows fd_set is
+        # WinSock's own, which holds 64 handles. CPython compiles against
+        # FD_SETSIZE 512 (Modules/selectmodule.c) and so can wait on all 100.
+        # Only the selector loop goes through select(); the proactor one does
+        # not, so the skip is keyed to the loop factory.
+        if (
+            sys.platform.startswith("win")
+            and isinstance(self.loop_factory, type)
+            and issubclass(self.loop_factory, asyncio.SelectorEventLoop)
+        ):
+            self.skipTest("TODO: RUSTPYTHON; Windows select() fd_set holds 64 handles")
         async def test():
             var = contextvars.ContextVar("var", default="default")
             var.set("before_server")
