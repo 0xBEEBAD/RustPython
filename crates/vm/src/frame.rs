@@ -7348,6 +7348,24 @@ impl ExecutingFrame<'_> {
                         }
                         let func = descr.method.func;
                         let md_name = descr.method.name;
+                        // `str.split(sep)` is labeled `METH_O` by the macro
+                        // (one non-`vm` Rust parameter, whatever its Python
+                        // arity), so it reaches this arm and would otherwise pay
+                        // the argument vector, the binder and the call context
+                        // below. The kernel runs the same `PyStr::split` on the
+                        // two stack slots; anything it does not recognize - no
+                        // separator, a maxsplit, a keyword, a subclass, a bytes
+                        // `split`, an object with `__index__` - is bound here as
+                        // before.
+                        if nargs == 1
+                            && self_or_null_is_some
+                            && md_name == "split"
+                            && !crate::perf_debug::ablated(crate::perf_debug::SPL_ARM)
+                            && self
+                                .try_call_split_descriptor(vm, nargs, self_index, stack_len)?
+                        {
+                            return Ok(None);
+                        }
                         if crate::perf_debug::ablated(crate::perf_debug::MD_ARM)
                             && crate::perf_debug::stub_md_name(md_name)
                         {
@@ -9359,6 +9377,46 @@ impl ExecutingFrame<'_> {
             key_handler(key)?;
         }
         Ok(())
+    }
+
+    /// The specialized `str.split(sep)` call, kept out of line on purpose: the
+    /// descriptor arm that calls it is one of the hottest in the loop, and a
+    /// block of this size inlined there measurably costs the instructions next
+    /// to it. Returns `true` when it handled the call, and `false` when the
+    /// caller must bind the arguments the generic way.
+    #[inline(never)]
+    fn try_call_split_descriptor(
+        &mut self,
+        vm: &VirtualMachine,
+        nargs: u32,
+        self_index: usize,
+        stack_len: usize,
+    ) -> PyResult<bool> {
+        let receiver = self
+            .localsplus
+            .stack_index(self_index)
+            .as_ref()
+            .and_then(|o| o.downcast_ref_if_exact::<PyStr>(vm));
+        let sep = self
+            .localsplus
+            .stack_index(stack_len - 1)
+            .as_ref()
+            .and_then(|o| o.downcast_ref_if_exact::<PyStr>(vm));
+        let (Some(zelf), Some(sep)) = (receiver, sep) else {
+            return Ok(false);
+        };
+        let args = crate::anystr::SplitArgs::from_parts(Some(sep.to_owned()), -1);
+        let outcome = PyStr::split(zelf, args, vm);
+        self.pop_multiple(nargs as usize).for_each(drop);
+        self.pop_value_opt(); // self
+        self.pop_value(); // callable
+        let elements = outcome?;
+        self.push_value_or_discard(
+            vm.ctx.new_list(elements).into(),
+            Instruction::from(Opcode::Call).cache_entries(),
+            vm,
+        );
+        Ok(true)
     }
 
     /// Vectorcall dispatch for Instruction::Call (positional args only).

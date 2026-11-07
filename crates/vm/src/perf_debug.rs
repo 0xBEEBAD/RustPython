@@ -51,6 +51,9 @@
 //! * `mdarm` - consume the descriptor call's slots and answer `None` without
 //!   building the argument vector; read against `mdstub`, the two price the
 //!   owned-`Vec` packing separately from everything the callee does
+//! * `splarm` - run `str.split(sep)` through the generic descriptor call instead
+//!   of the interpreter's direct call into the same kernel; the delta is what
+//!   the specialized route saves, and unlike `mdstub` it changes no answer
 //! * `encfast` - send every `str.encode()` through the codec registry again, even
 //!   the utf-8/strict spellings whose answer is the string's own bytes
 //! * `splreuse` - make a split that found no separator hand back the receiver as
@@ -238,6 +241,15 @@ pub(crate) const EXC_GCQUEUE: u64 = 1125899906842624;
 /// threads - it mutates shared state without synchronizing, which is only a
 /// question to ask on one thread.
 pub(crate) const EXC_GCNOLOCK: u64 = 2251799813685248;
+/// Measurement only: send `str.split(sep)` back through the generic
+/// method-descriptor call - owned argument vector, the separator bound a
+/// second time, the call context - instead of running the same `PyStr::split`
+/// on the two objects the interpreter already proved. The delta against the
+/// unablated run is exactly what the specialized route is worth, and `mdarm`
+/// stops earlier still (it skips the callee entirely), so together they price
+/// kernel, packing and arm. Never a correctness question: both routes call
+/// `PyStr::split`, so they cannot disagree about results or errors.
+pub(crate) const SPL_ARM: u64 = 4503599627370496;
 /// Measurement only: answer `None` from the specialized no-argument
 /// method-descriptor call without running the callee, which prices the dispatch
 /// arm itself - guards, argument vector, call context, stack moves - against the
@@ -436,6 +448,7 @@ pub(crate) fn ablated(bit: u64) -> bool {
                     "excsyncflot" => EXC_SYNCFLOT,
                     "excgcqueue" => EXC_GCQUEUE,
                     "excgcnolock" => EXC_GCNOLOCK,
+                    "splarm" => SPL_ARM,
                     "mdstub" => MD_STUB,
                     "mdctx" => MD_CTX,
                     "mdarm" => MD_ARM,

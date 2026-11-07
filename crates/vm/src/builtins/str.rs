@@ -967,7 +967,11 @@ impl PyStr {
     }
 
     #[pymethod]
-    fn split(zelf: &Py<Self>, args: SplitArgs, vm: &VirtualMachine) -> PyResult<Vec<PyObjectRef>> {
+    pub(crate) fn split(
+        zelf: &Py<Self>,
+        args: SplitArgs,
+        vm: &VirtualMachine,
+    ) -> PyResult<Vec<PyObjectRef>> {
         // CPython reuses the receiver for the single piece of a split that found
         // nothing, but only when the class is exactly `str`: a subclass gets a
         // fresh plain-str piece. Offer the receiver accordingly.

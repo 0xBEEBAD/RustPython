@@ -4,7 +4,7 @@ use num_traits::{cast::ToPrimitive, sign::Signed};
 use rustpython_unicode::case;
 
 use crate::{
-    Py, PyObject, PyObjectRef, PyResult, TryFromObject, VirtualMachine,
+    AsObject, Py, PyObject, PyObjectRef, PyResult, TryFromObject, VirtualMachine,
     builtins::{PyIntRef, PyTuple},
     convert::TryFromBorrowedObject,
     function::OptionalOption,
@@ -16,6 +16,16 @@ pub struct SplitArgs<T: TryFromObject> {
     sep: Option<T>,
     #[pyarg(any, default = -1)]
     maxsplit: isize,
+}
+
+impl<T: TryFromObject> SplitArgs<T> {
+    /// Rebuild the pair an interpreter fast path has already unpacked, so a
+    /// specialized call runs the same body as the generic one instead of a copy
+    /// of it. The fields stay private and this is the only constructor outside
+    /// the argument binder, so the two paths cannot disagree on a default.
+    pub(crate) fn from_parts(sep: Option<T>, maxsplit: isize) -> Self {
+        Self { sep, maxsplit }
+    }
 }
 
 #[derive(FromArgs)]
@@ -209,6 +219,10 @@ pub(crate) trait AnyStr {
             && splits.len() == 1
             && let Some(zelf) = reuse_self
             && !crate::perf_debug::ablated(crate::perf_debug::SPLIT_REUSE)
+            // The single-byte path already answers with the receiver when the
+            // separator does not occur, so patching again would only be a
+            // reference taken and dropped.
+            && !core::ptr::eq(splits[0].as_object(), zelf)
         {
             splits[0] = zelf.to_owned();
         }
