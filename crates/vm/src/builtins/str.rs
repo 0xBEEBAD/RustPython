@@ -1007,7 +1007,21 @@ impl PyStr {
                             return out;
                         }
                         let sep_byte = sep[0];
-                        let pieces = bytes.iter().filter(|&&b| b == sep_byte).count() + 1;
+                        // CPython looks for the separator before it builds
+                        // anything, and when the separator does not occur it
+                        // hands back the receiver (`Objects/stringlib/split.h`:
+                        // `count == 0 && STRINGLIB_CHECK_EXACT`). Answering from
+                        // here instead of letting `py_split` replace the piece it
+                        // already built skips a whole string lifecycle on every
+                        // no-match split - the copy was being thrown away a
+                        // moment later, and it is what the `splpiece` gate
+                        // measured at 67 ns on `"ABCDEFGHIJ".split("d")`.
+                        if let Some(zelf) = reuse_self {
+                            if memchr(sep_byte, bytes).is_none() {
+                                return vec![zelf.to_owned()];
+                            }
+                        }
+                        let pieces = memchr::memchr_iter(sep_byte, bytes).count() + 1;
                         let mut out = Vec::with_capacity(pieces);
                         let pieces_only =
                             crate::perf_debug::ablated(crate::perf_debug::SPL_PIECES) && stubbed;
