@@ -18,7 +18,8 @@ param(
         # reads that body; only this module watches the visible-field rule.
         'test_structseq'
     ),
-    [int]$Jobs = 6
+    [int]$Jobs = 6,
+    [switch]$SkipRust
 )
 
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -35,6 +36,34 @@ if ($absent) {
     Write-Host ("real names available: {0}" -f (($Tests | Where-Object { Test-Path "Lib/test/$_.py" }) -join ', '))
     exit 3
 }
+# Rust unit tests, run only when the tree actually differs from HEAD under
+# crates/. `cargo build --bin rustpython` does NOT compile #[cfg(test)] code, so
+# a broken or #[ignore]d test can sit on main through six commits and every
+# Python gate still says SUCCESS - which is exactly what happened to the
+# lifecycle benchmark in crates/vm/src/builtins/str.rs. AGENTS.md asks for this
+# command on any Rust change; here it is part of the gate so it cannot be
+# forgotten, and it costs nothing when no Rust changed. -SkipRust opts out.
+if (-not $SkipRust) {
+    $rustChanged = git diff --name-only HEAD -- crates/ 2>$null
+    if ($LASTEXITCODE -ne 0) { $rustChanged = '' }
+    if ($rustChanged) {
+        Write-Host ("verify: Rust sources changed ({0} file(s)); running cargo test" -f
+            (@($rustChanged).Count))
+        cargo test --workspace --exclude rustpython_wasm --exclude rustpython-venvlauncher --exclude rustpython-capi --release 2>&1 | Tee-Object -Variable rust | Out-Null
+        $rustCode = $LASTEXITCODE
+        $rust | Select-String -Pattern '^test result|^error(\[|:)' | Select-Object -First 25 |
+            ForEach-Object { $_.Line }
+        if ($rustCode -ne 0) {
+            $msg = 'verify: cargo test FAILED exit={0}; the Python results below do not verify this change' -f $rustCode
+            Write-Host $msg
+            exit 4
+        }
+        Write-Host 'verify: cargo test ok'
+    } else {
+        Write-Host 'verify: no Rust changes, cargo test skipped'
+    }
+}
+
 & $Exe -m test "-j$Jobs" @Tests 2>&1 | Tee-Object -Variable out | Out-Null
 $code = $LASTEXITCODE
 $sw.Stop()
